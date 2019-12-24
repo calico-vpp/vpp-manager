@@ -117,11 +117,7 @@ func prepareInterface() error {
 			return errors.Wrapf(err, "Error setting link %s down", initialConfig.name)
 		}
 	}
-	return errors.Wrapf(
-		swapDriver(initialConfig.pciId, "uio_pci_generic"),
-		"Error swapping driver for PCI device %s",
-		initialConfig.pciId,
-	)
+	return nil
 }
 
 func restoreLinuxConfig() error {

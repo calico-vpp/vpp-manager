@@ -7,7 +7,7 @@ build:
 	GOOS=linux go build
 
 
-image:
+image: build
 	docker build -t calicovpp/vpp:latest .
 
 

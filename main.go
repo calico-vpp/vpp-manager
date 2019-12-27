@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -19,6 +20,9 @@ import (
 	vppip "github.com/calico-vpp/vpp-manager/vpp-1908-api/ip"
 	"github.com/calico-vpp/vpp-manager/vpp-1908-api/tapv2"
 	"github.com/pkg/errors"
+	calicoapi "github.com/projectcalico/libcalico-go/lib/apis/v3"
+	calicocli "github.com/projectcalico/libcalico-go/lib/clientv3"
+	calicoopts "github.com/projectcalico/libcalico-go/lib/options"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 )
@@ -30,6 +34,7 @@ const (
 	IpConfigEnvVar       = "CALICOVPP_IP_CONFIG"
 	InterfaceEnvVar      = "CALICOVPP_INTERFACE"
 	ConfigTemplateEnvVar = "CALICOVPP_CONFIG_TEMPLATE"
+	ServicePrefixEnvVar  = "SERVICE_PREFIX"
 	HostIfName           = "vpptap0"
 	HostIfTag            = "hosttap"
 	VppTapAddrPrefixLen  = 30
@@ -39,6 +44,7 @@ var (
 	vppProcess              *os.Process
 	runningCond             *sync.Cond
 	initialConfig           interfaceConfig
+	serviceNet              *net.IPNet
 	vppSideMacAddress       = [6]byte{2, 0, 0, 0, 0, 2}
 	containerSideMacAddress = [6]byte{2, 0, 0, 0, 0, 1}
 	vppFakeNextHopAddr      = net.IPv4(169, 254, 254, 254).To4()
@@ -155,6 +161,7 @@ func restoreLinuxConfig() error {
 		// Re-add all adresses and routes
 		failed := false
 		for _, addr := range initialConfig.addresses {
+			log.Infof("restoring address %s", addr.String())
 			err := netlink.AddrAdd(link, &addr)
 			if err != nil {
 				log.Errorf("cannot add address %+v back to %s", addr, link.Attrs().Name)
@@ -163,6 +170,7 @@ func restoreLinuxConfig() error {
 			}
 		}
 		for _, route := range initialConfig.routes {
+			log.Infof("restoring RouteList %s", route.String())
 			err := netlink.RouteAdd(&route)
 			if err != nil {
 				log.Errorf("cannot add route %+v back to %s", route, link.Attrs().Name)
@@ -422,10 +430,13 @@ func configureVpp() error {
 		if addr.IP.To4() == nil {
 			continue // TODO
 		}
-		singleAddr := addr
-		singleAddr.Mask = net.CIDRMask(32, 32)
-		singleAddr.Label = HostIfName
-		singleAddr.Broadcast = nil
+		singleAddr := netlink.Addr{
+			IPNet: &net.IPNet{
+				IP:   addr.IP,
+				Mask: net.CIDRMask(32, 32),
+			},
+			Label: HostIfName,
+		}
 		log.Infof("Adding address %+v to tap interface", singleAddr)
 		err = netlink.AddrAdd(link, &singleAddr)
 		if err != nil {
@@ -453,7 +464,18 @@ func configureVpp() error {
 	if err != nil {
 		return errors.Wrap(err, "cannot add neighbor to tap")
 	}
+	// Add a route for the service prefix through VPP
+	log.Infof("adding route to service prefix %s through VPP", serviceNet.String())
+	err = netlink.RouteAdd(&netlink.Route{
+		Dst:       serviceNet,
+		LinkIndex: link.Attrs().Index,
+		Gw:        vppTapAddr,
+	})
+	if err != nil {
+		return errors.Wrap(err, "cannot add service route to tap")
+	}
 
+	// All routes that were on this interface now go through VPP
 	for _, route := range initialConfig.routes {
 		if route.Dst.IP.To4() == nil {
 			continue //TODO
@@ -476,7 +498,46 @@ func configureVpp() error {
 }
 
 func updateCalicoNode() error {
-	return nil
+	nodeName := os.Getenv("NODENAME")
+	client, err := calicocli.NewFromEnv()
+	if err != nil {
+		return errors.Wrap(err, "error creating calico client")
+	}
+	node, err := client.Nodes().Get(context.Background(), nodeName, calicoopts.GetOptions{})
+	if err != nil {
+		return errors.Wrap(err, "cannot get current node from Calico")
+		// TODO create if doesn't exist? need to be careful to do it atomically... and everyone else must as well.
+	}
+	var currentConf string
+	if node.Spec.BGP == nil {
+		log.Infof("node currently has no BGP config")
+		currentConf = ""
+	} else {
+		currentConf = node.Spec.BGP.IPv4Address
+		log.Infof("current node IP configuration: %s", currentConf)
+	}
+	var nodeIP string
+	for _, a := range initialConfig.addresses {
+		if a.IP.To4() == nil {
+			continue // TODO handle IPv6
+		}
+		nodeIP = a.IPNet.String()
+		break
+	}
+	if nodeIP == "" {
+		return fmt.Errorf("no address found for node")
+	}
+	log.Infof("using %s as node IP for Calico", nodeIP)
+	if nodeIP == currentConf {
+		return nil // Nothing to do
+	}
+	// Update node with address
+	newNode := calicoapi.NewNode()
+	newNode.Name = nodeName
+	newNode.Spec.BGP.IPv4Address = nodeIP
+	updated, err := client.Nodes().Update(context.Background(), newNode, calicoopts.SetOptions{})
+	log.Infof("updated node: %+v", updated)
+	return errors.Wrapf(err, "error updating node %s", nodeName)
 }
 
 // Returns VPP exit code
@@ -547,6 +608,12 @@ func main() {
 	err := getLinuxConfig(intf)
 	if err != nil {
 		log.Errorf("Error getting initial interface configuration: %s", err)
+		return
+	}
+	servicePrefixStr := os.Getenv(ServicePrefixEnvVar)
+	_, serviceNet, err = net.ParseCIDR(servicePrefixStr)
+	if err != nil {
+		log.Errorf("invalid service prefix configuration: %s %s", servicePrefixStr, err)
 		return
 	}
 	err = generateVppConfigFile()

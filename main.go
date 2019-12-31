@@ -207,7 +207,10 @@ func setIntUp(ch vppapi.Channel, swIfIndex uint32) error {
 	}
 	AdminUpResponse := &interfaces.SwInterfaceSetFlagsReply{}
 	err := ch.SendRequest(AdminUpRequest).ReceiveReply(AdminUpResponse)
-	return errors.Wrapf(err, "setting interface %d up failed", swIfIndex)
+	if err != nil || AdminUpResponse.Retval != 0 {
+		return fmt.Errorf("setting interface %d up failed: %d %v", swIfIndex, AdminUpResponse.Retval, err)
+	}
+	return nil
 }
 
 func addrAdd(ch vppapi.Channel, swIfIndex uint32, addr netlink.Addr) error {
@@ -310,7 +313,7 @@ func routeAdd(ch vppapi.Channel, swIfIndex uint32, dst net.IPNet, gw net.IP) err
 	response := &vppip.IPRouteAddDelReply{}
 	err := ch.SendRequest(request).ReceiveReply(response)
 	if err != nil || response.Retval != 0 {
-		return fmt.Errorf("cannot add route %s vis %s in VPP: %v %d", dst, gw, err, response.Retval)
+		return fmt.Errorf("cannot add route %s via %s in VPP: %v %d", dst, gw, err, response.Retval)
 	}
 	return nil
 }
@@ -388,6 +391,8 @@ func configureVpp() error {
 	err = ch.SendRequest(request).ReceiveReply(response)
 	if err != nil {
 		return errors.Wrap(err, "error creating tap in vpp")
+	} else if response.Retval != 0 {
+		return fmt.Errorf("error creating tap: retval %d", response.Retval)
 	}
 	if response.Retval != 0 {
 		return errors.Wrapf(err, "vpp tap creation failed with code %d. Request: %+v", response.Retval, request)
@@ -411,7 +416,7 @@ func configureVpp() error {
 	if err != nil {
 		return errors.Wrap(err, "error adding neighbor to tap")
 	}
-	err = puntRedirect(ch, dataIfIndex, tapSwIfIndex, vppFakeNextHopAddr)
+	err = puntRedirect(ch, ^uint32(0), tapSwIfIndex, vppFakeNextHopAddr)
 	if err != nil {
 		return errors.Wrap(err, "error adding redirect to tap")
 	}
@@ -575,6 +580,8 @@ func runVpp(confSource string) (int, error) {
 		log.Errorf("Error updating Calico node: %v", err)
 		vppProcess.Signal(syscall.SIGINT)
 	}
+
+	go syncPools()
 
 	// TODO add something that can be checked by k8s health check when VPP is up
 	// or a flag to this program that checks both vpp status and the configuration status

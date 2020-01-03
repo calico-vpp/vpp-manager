@@ -1,3 +1,18 @@
+// Copyright (C) 2019 Cisco Systems Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -537,10 +552,15 @@ func updateCalicoNode() error {
 		return nil // Nothing to do
 	}
 	// Update node with address
-	newNode := calicoapi.NewNode()
-	newNode.Name = nodeName
-	newNode.Spec.BGP.IPv4Address = nodeIP
-	updated, err := client.Nodes().Update(context.Background(), newNode, calicoopts.SetOptions{})
+	if node.Spec.BGP == nil {
+		node.Spec.BGP = &calicoapi.NodeBGPSpec{
+			IPv4Address: nodeIP,
+		}
+	} else {
+		node.Spec.BGP.IPv4Address = nodeIP
+	}
+	updated, err := client.Nodes().Update(context.Background(), node, calicoopts.SetOptions{})
+	// TODO handle update error / retry if object changed in the meantime
 	log.Infof("updated node: %+v", updated)
 	return errors.Wrapf(err, "error updating node %s", nodeName)
 }

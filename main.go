@@ -619,7 +619,23 @@ func runVpp(confSource string) (int, error) {
 	return exitCode, errors.Wrap(restoreLinuxConfig(), "Error restoring linux config")
 }
 
+func configurePod() error {
+	lim := syscall.Rlimit{
+		Cur: syscall.RLIM_INFINITY,
+		Max: syscall.RLIM_INFINITY,
+	}
+	err := syscall.Setrlimit(8, &lim) // 8 - RLIMIT_MEMLOCK
+	if err != nil {
+		return errors.Wrap("Error raising memlock limit, VPP may fail to start:", err)
+	}
+}
+
 func main() {
+	err := configurePod()
+	if err != nil {
+		log.Errorf("Error during initial config:")
+	}
+
 	runningCond = sync.NewCond(&sync.Mutex{})
 	go handleSignals()
 	intf := os.Getenv(InterfaceEnvVar)
@@ -632,7 +648,7 @@ func main() {
 		log.Errorf("No ip configuration source specified. Specify one of linux, [[calico or dhcp]] through the %s environment variable", IpConfigEnvVar)
 		return
 	}
-	err := getLinuxConfig(intf)
+	err = getLinuxConfig(intf)
 	if err != nil {
 		log.Errorf("Error getting initial interface configuration: %s", err)
 		return

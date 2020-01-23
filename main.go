@@ -164,10 +164,22 @@ func restoreLinuxConfig() error {
 		return errors.Wrapf(err, "error swapping back driver to %s for %s", initialConfig.driver, initialConfig.pciId)
 	}
 	if initialConfig.isUp {
-		// This assumes the link has kept the same name after the rebind. Is it always true?
-		link, err := netlink.LinkByName(initialConfig.name)
-		if err != nil {
-			return errors.Wrapf(err, "error finding link %s", initialConfig.name)
+		// This assumes the link has kept the same name after the rebind.
+		// It should be always true on systemd based distros
+		retries := 0
+		var link netlink.Link
+		for {
+			link, err = netlink.LinkByName(initialConfig.name)
+			if err != nil {
+				retries += 1
+				if retries >= 10 {
+					return errors.Wrapf(err, "error finding link %s after %d tries", initialConfig.name, retries)
+				}
+				time.Sleep(500 * time.Millisecond)
+			} else {
+				log.Debugf("found links %s after %d tries", initialConfig.name, retries)
+				break
+			}
 		}
 		err = netlink.LinkSetUp(link)
 		if err != nil {
@@ -619,19 +631,17 @@ func runVpp(confSource string) (int, error) {
 	return exitCode, errors.Wrap(restoreLinuxConfig(), "Error restoring linux config")
 }
 
-func configurePod() error {
+func configureContainer() error {
 	lim := syscall.Rlimit{
-		Cur: syscall.RLIM_INFINITY,
-		Max: syscall.RLIM_INFINITY,
+		Cur: ^uint64(0),
+		Max: ^uint64(0),
 	}
 	err := syscall.Setrlimit(8, &lim) // 8 - RLIMIT_MEMLOCK
-	if err != nil {
-		return errors.Wrap("Error raising memlock limit, VPP may fail to start:", err)
-	}
+	return errors.Wrap(err, "Error raising memlock limit, VPP may fail to start")
 }
 
 func main() {
-	err := configurePod()
+	err := configureContainer()
 	if err != nil {
 		log.Errorf("Error during initial config:")
 	}

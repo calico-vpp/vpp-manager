@@ -127,6 +127,32 @@ func getLinuxConfig(linkName string) error {
 	return nil
 }
 
+func isDriverLoaded(driver string) (bool, error) {
+	_, err := os.Stat("/sys/bus/pci/drivers/" + driver)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func checkDrivers() {
+	vfioLoaded, err := isDriverLoaded("vfio-pci")
+	if err != nil {
+		log.Warnf("error determining whether vfio-pci is loaded")
+	}
+	uioLoaded, err := isDriverLoaded("uio_pci_generic")
+	if err != nil {
+		log.Warnf("error determining whether vfio-pci is loaded")
+	}
+	if !vfioLoaded && !uioLoaded {
+		log.Warnf("did not find vfio-pci or uio_pci_generic driver")
+		log.Warnf("VPP may fail to grab its interface")
+	}
+}
+
 func swapDriver(pciDevice, newDriver string) error {
 	unbindPath := fmt.Sprintf("/sys/bus/pci/devices/%s/driver/unbind", pciDevice)
 	err := ioutil.WriteFile(unbindPath, []byte(pciDevice), 0200)
@@ -645,6 +671,8 @@ func main() {
 	if err != nil {
 		log.Errorf("Error during initial config:")
 	}
+
+	checkDrivers()
 
 	runningCond = sync.NewCond(&sync.Mutex{})
 	go handleSignals()

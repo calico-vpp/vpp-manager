@@ -42,7 +42,7 @@ func poolAdded(network string) error {
 		return errors.Wrapf(err, "cannot find interface named %s", HostIfName)
 	}
 
-	err = netlink.RouteAdd(&netlink.Route{
+	err = netlink.RouteReplace(&netlink.Route{
 		Dst:       cidr,
 		LinkIndex: link.Attrs().Index,
 		Gw:        vppTapAddr,
@@ -99,7 +99,7 @@ func syncPools() error {
 				pools[key] = nil
 				err = poolAdded(key)
 				if err != nil {
-					return poolSyncError(errors.Wrap(err, "error deleting pool %s"))
+					return poolSyncError(errors.Wrap(err, "error adding pool %s"))
 				}
 			}
 		}

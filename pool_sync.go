@@ -45,7 +45,7 @@ func poolAdded(network string) error {
 	err = netlink.RouteReplace(&netlink.Route{
 		Dst:       cidr,
 		LinkIndex: link.Attrs().Index,
-		Gw:        vppTapAddr,
+		Gw:        params.vppTapAddr,
 	})
 	return errors.Wrapf(err, "cannot add pool route %s through vpp tap", network)
 }
@@ -65,7 +65,7 @@ func poolDeleted(network string) error {
 	err = netlink.RouteDel(&netlink.Route{
 		Dst:       cidr,
 		LinkIndex: link.Attrs().Index,
-		Gw:        vppTapAddr,
+		Gw:        params.vppTapAddr,
 	})
 	return errors.Wrapf(err, "cannot delete pool route %s through vpp tap", network)
 }

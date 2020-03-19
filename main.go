@@ -321,17 +321,23 @@ func generateVppConfigFile() error {
 	)
 }
 
-func setIntUp(ch vppapi.Channel, swIfIndex uint32) error {
+func setIntUp(ch vppapi.Channel, swIfIndex uint32) (err error) {
 	AdminUpRequest := &interfaces.SwInterfaceSetFlags{
 		SwIfIndex:   swIfIndex,
 		AdminUpDown: 1,
 	}
 	AdminUpResponse := &interfaces.SwInterfaceSetFlagsReply{}
-	err := ch.SendRequest(AdminUpRequest).ReceiveReply(AdminUpResponse)
-	if err != nil || AdminUpResponse.Retval != 0 {
-		return fmt.Errorf("setting interface %d up failed: %d %v", swIfIndex, AdminUpResponse.Retval, err)
+
+	for i := 0; i < 10; i++ {
+		err = ch.SendRequest(AdminUpRequest).ReceiveReply(AdminUpResponse)
+		if err != nil || AdminUpResponse.Retval != 0 {
+			log.Warnf("Error trying to bring interface %d up (try %d/10): %d %v", swIfIndex, i+1, AdminUpResponse.Retval, err)
+			time.Sleep(time.Second)
+		} else {
+			return nil
+		}
 	}
-	return nil
+	return errors.Wrapf(err, "Error setting if %d up (retval %d)", swIfIndex, AdminUpResponse.Retval)
 }
 
 func addrAdd(ch vppapi.Channel, swIfIndex uint32, addr netlink.Addr) error {

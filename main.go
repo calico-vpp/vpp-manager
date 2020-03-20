@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -43,23 +44,26 @@ import (
 )
 
 const (
-	VppConfigFile        = "/etc/vpp/startup.conf"
-	VppApiSocket         = "/var/run/vpp/vpp-api.sock"
-	VppPath              = "/usr/bin/vpp"
-	IpConfigEnvVar       = "CALICOVPP_IP_CONFIG"
-	InterfaceEnvVar      = "CALICOVPP_INTERFACE"
-	ConfigTemplateEnvVar = "CALICOVPP_CONFIG_TEMPLATE"
-	ServicePrefixEnvVar  = "SERVICE_PREFIX"
-	HostIfName           = "vpptap0"
-	HostIfTag            = "hosttap"
-	VppTapAddrPrefixLen  = 30
+	VppConfigFile            = "/etc/vpp/startup.conf"
+	VppConfigExecFile        = "/etc/vpp/startup.exec"
+	VppApiSocket             = "/var/run/vpp/vpp-api.sock"
+	VppPath                  = "/usr/bin/vpp"
+	IpConfigEnvVar           = "CALICOVPP_IP_CONFIG"
+	InterfaceEnvVar          = "CALICOVPP_INTERFACE"
+	ConfigTemplateEnvVar     = "CALICOVPP_CONFIG_TEMPLATE"
+	ConfigExecTemplateEnvVar = "CALICOVPP_CONFIG_EXEC_TEMPLATE"
+	VppStartupSleepEnvVar    = "CALICOVPP_VPP_STARTUP_SLEEP"
+	ServicePrefixEnvVar      = "SERVICE_PREFIX"
+	HostIfName               = "vpptap0"
+	HostIfTag                = "hosttap"
+	VppTapAddrPrefixLen      = 30
 )
 
 var (
 	vppProcess              *os.Process
 	runningCond             *sync.Cond
 	initialConfig           interfaceConfig
-	serviceNet              *net.IPNet
+	params                  vppManagerParams
 	vppSideMacAddress       = [6]byte{2, 0, 0, 0, 0, 2}
 	containerSideMacAddress = [6]byte{2, 0, 0, 0, 0, 1}
 	vppFakeNextHopAddr      = net.IPv4(169, 254, 254, 254).To4()
@@ -67,12 +71,63 @@ var (
 )
 
 type interfaceConfig struct {
-	name      string
 	pciId     string
 	driver    string
 	isUp      bool
 	addresses []netlink.Addr
 	routes    []netlink.Route
+}
+
+type vppManagerParams struct {
+	vppStartupSleepSeconds int
+	mainInterface          string
+	configExecTemplate     string
+	configTemplate         string
+	nodeName               string
+	serviceNet             *net.IPNet
+	vppIpConfSource        string
+}
+
+func parseEnvVariables() (err error) {
+	vppStartupSleep := os.Getenv(VppStartupSleepEnvVar)
+	if vppStartupSleep == "" {
+		params.vppStartupSleepSeconds = 0
+	} else {
+		i, err := strconv.ParseInt(vppStartupSleep, 10, 32)
+		params.vppStartupSleepSeconds = int(i)
+		if err != nil {
+			return errors.Wrapf(err, "Error Parsing %s", VppStartupSleepEnvVar)
+		}
+	}
+
+	params.mainInterface = os.Getenv(InterfaceEnvVar)
+	if params.mainInterface == "" {
+		return errors.Errorf("No interface specified. Specify an interface through the %s environment variable", InterfaceEnvVar)
+	}
+
+	params.configExecTemplate = os.Getenv(ConfigExecTemplateEnvVar)
+
+	params.configTemplate = os.Getenv(ConfigTemplateEnvVar)
+	if params.configTemplate == "" {
+		return fmt.Errorf("empty VPP configuration template, set a template in the %s environment variable", ConfigTemplateEnvVar)
+	}
+
+	params.nodeName = os.Getenv("NODENAME")
+	if params.nodeName == "" {
+		return errors.Errorf("No node name specified. Specify the NODENAME environment variable")
+	}
+
+	servicePrefixStr := os.Getenv(ServicePrefixEnvVar)
+	_, params.serviceNet, err = net.ParseCIDR(servicePrefixStr)
+	if err != nil {
+		return errors.Errorf("invalid service prefix configuration: %s %s", servicePrefixStr, err)
+	}
+
+	params.vppIpConfSource = os.Getenv(IpConfigEnvVar)
+	if params.vppIpConfSource != "linux" { // TODO add other sources
+		return errors.Errorf("No ip configuration source specified. Specify one of linux, [[calico or dhcp]] through the %s environment variable", IpConfigEnvVar)
+	}
+	return nil
 }
 
 func handleSignals() {
@@ -92,37 +147,40 @@ func handleSignals() {
 	}
 }
 
-func getLinuxConfig(linkName string) error {
-	initialConfig.name = linkName
-	link, err := netlink.LinkByName(linkName)
+func getLinuxConfig() error {
+	link, err := netlink.LinkByName(params.mainInterface)
 	if err != nil {
-		return errors.Wrapf(err, "cannot find interface named %s", linkName)
+		return errors.Wrapf(err, "cannot find interface named %s", params.mainInterface)
 	}
-	// Grab PCI id and driver ID
-	deviceLinkPath := fmt.Sprintf("/sys/class/net/%s/device", linkName)
-	devicePath, err := os.Readlink(deviceLinkPath)
-	if err != nil {
-		return errors.Wrapf(err, "cannot find pci device for %s", linkName)
-	}
-	initialConfig.pciId = strings.TrimLeft(devicePath, "./")
-	driverLinkPath := fmt.Sprintf("/sys/class/net/%s/device/driver", linkName)
-	driverPath, err := os.Readlink(driverLinkPath)
-	if err != nil {
-		return errors.Wrapf(err, "cannot find driver for %s", linkName)
-	}
-	initialConfig.driver = driverPath[strings.LastIndex(driverPath, "/")+1:]
 	initialConfig.isUp = (link.Attrs().Flags & net.FlagUp) != 0
 	if initialConfig.isUp {
 		// Grab addresses and routes
 		initialConfig.addresses, err = netlink.AddrList(link, netlink.FAMILY_ALL)
 		if err != nil {
-			return errors.Wrapf(err, "cannot list %s addresses", linkName)
+			return errors.Wrapf(err, "cannot list %s addresses", params.mainInterface)
 		}
 		initialConfig.routes, err = netlink.RouteList(link, netlink.FAMILY_ALL)
 		if err != nil {
-			return errors.Wrapf(err, "cannot list %s routes", linkName)
+			return errors.Wrapf(err, "cannot list %s routes", params.mainInterface)
 		}
 	}
+	// We allow PCI not to be found e.g for AF_PACKET
+	// Grab PCI id
+	deviceLinkPath := fmt.Sprintf("/sys/class/net/%s/device", params.mainInterface)
+	devicePath, err := os.Readlink(deviceLinkPath)
+	if err != nil {
+		log.Warnf("cannot find pci device for %s : %s", params.mainInterface, err)
+		return nil
+	}
+	initialConfig.pciId = strings.TrimLeft(devicePath, "./")
+	// Grab Driver id
+	driverLinkPath := fmt.Sprintf("/sys/class/net/%s/device/driver", params.mainInterface)
+	driverPath, err := os.Readlink(driverLinkPath)
+	if err != nil {
+		log.Warnf("cannot find driver for %s : %s", params.mainInterface, err)
+		return nil
+	}
+	initialConfig.driver = driverPath[strings.LastIndex(driverPath, "/")+1:]
 	log.Infof("Initial device config: %+v", initialConfig)
 	return nil
 }
@@ -170,24 +228,26 @@ func swapDriver(pciDevice, newDriver string) error {
 // Set interface down if it is up, bind it to a VPP-friendly driver
 func prepareInterface() error {
 	if initialConfig.isUp {
-		link, err := netlink.LinkByName(initialConfig.name)
+		link, err := netlink.LinkByName(params.mainInterface)
 		if err != nil {
-			return errors.Wrapf(err, "error finding link %s", initialConfig.name)
+			return errors.Wrapf(err, "error finding link %s", params.mainInterface)
 		}
 		err = netlink.LinkSetDown(link)
 		if err != nil {
-			return errors.Wrapf(err, "error setting link %s down", initialConfig.name)
+			return errors.Wrapf(err, "error setting link %s down", params.mainInterface)
 		}
 	}
 	return nil
 }
 
-func restoreLinuxConfig() error {
+func restoreLinuxConfig() (err error) {
 	// No need to delete the tap we created with VPP since it should disappear with all its configuration
 	// when VPP dies
-	err := swapDriver(initialConfig.pciId, initialConfig.driver)
-	if err != nil {
-		return errors.Wrapf(err, "error swapping back driver to %s for %s", initialConfig.driver, initialConfig.pciId)
+	if initialConfig.pciId != "" && initialConfig.driver != "" {
+		err := swapDriver(initialConfig.pciId, initialConfig.driver)
+		if err != nil {
+			return errors.Wrapf(err, "error swapping back driver to %s for %s", initialConfig.driver, initialConfig.pciId)
+		}
 	}
 	if initialConfig.isUp {
 		// This assumes the link has kept the same name after the rebind.
@@ -195,21 +255,21 @@ func restoreLinuxConfig() error {
 		retries := 0
 		var link netlink.Link
 		for {
-			link, err = netlink.LinkByName(initialConfig.name)
+			link, err = netlink.LinkByName(params.mainInterface)
 			if err != nil {
 				retries += 1
 				if retries >= 10 {
-					return errors.Wrapf(err, "error finding link %s after %d tries", initialConfig.name, retries)
+					return errors.Wrapf(err, "error finding link %s after %d tries", params.mainInterface, retries)
 				}
 				time.Sleep(500 * time.Millisecond)
 			} else {
-				log.Debugf("found links %s after %d tries", initialConfig.name, retries)
+				log.Debugf("found links %s after %d tries", params.mainInterface, retries)
 				break
 			}
 		}
 		err = netlink.LinkSetUp(link)
 		if err != nil {
-			return errors.Wrapf(err, "error setting link %s back up", initialConfig.name)
+			return errors.Wrapf(err, "error setting link %s back up", params.mainInterface)
 		}
 		// Re-add all adresses and routes
 		failed := false
@@ -238,14 +298,22 @@ func restoreLinuxConfig() error {
 	return nil
 }
 
-func generateVppConfigFile() error {
-	template := os.Getenv(ConfigTemplateEnvVar)
-	if template == "" {
-		return fmt.Errorf("empty VPP configuration template, set a template in the %s environment variable", ConfigTemplateEnvVar)
+func generateVppConfigExecFile() error {
+	if params.configExecTemplate == "" {
+		return nil
 	}
 	// Trivial rendering for the moment...
-	template = strings.ReplaceAll(template, "__PCI_DEVICE_ID__", initialConfig.pciId)
+	template := strings.ReplaceAll(params.configExecTemplate, "__VPP_DATAPLANE_IF__", params.mainInterface)
+	return errors.Wrapf(
+		ioutil.WriteFile(VppConfigExecFile, []byte(template), 0644),
+		"error writing VPP Exec configuration to %s",
+		VppConfigFile,
+	)
+}
 
+func generateVppConfigFile() error {
+	// Trivial rendering for the moment...
+	template := strings.ReplaceAll(params.configTemplate, "__PCI_DEVICE_ID__", initialConfig.pciId)
 	return errors.Wrapf(
 		ioutil.WriteFile(VppConfigFile, []byte(template), 0644),
 		"error writing VPP configuration to %s",
@@ -371,6 +439,17 @@ func routeAdd(ch vppapi.Channel, swIfIndex uint32, dst net.IPNet, gw net.IP) err
 	return nil
 }
 
+func removeInitialRoutes() {
+	for _, route := range initialConfig.routes {
+		log.Infof("deleting Route %s", route.String())
+		err := netlink.RouteDel(&route)
+		if err != nil {
+			log.Errorf("cannot delete route %+v: %+v", route, err)
+			// Keep going for the rest of the config
+		}
+	}
+}
+
 func configureVpp() error {
 	// Get an API connection, with a few retries to accomodate VPP startup time
 	var conn *vppcore.Connection
@@ -419,7 +498,7 @@ func configureVpp() error {
 		if route.Gw == nil {
 			continue
 		}
-		if route.Dst.IP.To4() == nil {
+		if route.Dst == nil || route.Dst.IP.To4() == nil {
 			continue //TODO
 		}
 		err = routeAdd(ch, dataIfIndex, *route.Dst, route.Gw)
@@ -474,8 +553,17 @@ func configureVpp() error {
 		return errors.Wrap(err, "error adding redirect to tap")
 	}
 
+	// If main interface flush its routes or they'll conflict with $HostIfName
+	link, err := netlink.LinkByName(params.mainInterface)
+	if err == nil {
+		isUp := (link.Attrs().Flags & net.FlagUp) != 0
+		if isUp {
+			removeInitialRoutes()
+		}
+	}
+
 	// Linux side tap setup
-	link, err := netlink.LinkByName(HostIfName)
+	link, err = netlink.LinkByName(HostIfName)
 	if err != nil {
 		return errors.Wrapf(err, "cannot find interface named %s", HostIfName)
 	}
@@ -523,9 +611,9 @@ func configureVpp() error {
 		return errors.Wrap(err, "cannot add neighbor to tap")
 	}
 	// Add a route for the service prefix through VPP
-	log.Infof("adding route to service prefix %s through VPP", serviceNet.String())
+	log.Infof("adding route to service prefix %s through VPP", params.serviceNet.String())
 	err = netlink.RouteAdd(&netlink.Route{
-		Dst:       serviceNet,
+		Dst:       params.serviceNet,
 		LinkIndex: link.Attrs().Index,
 		Gw:        vppTapAddr,
 	})
@@ -535,7 +623,7 @@ func configureVpp() error {
 
 	// All routes that were on this interface now go through VPP
 	for _, route := range initialConfig.routes {
-		if route.Dst.IP.To4() == nil {
+		if route.Dst == nil || route.Dst.IP.To4() == nil {
 			continue //TODO
 		}
 		newRoute := netlink.Route{
@@ -545,7 +633,9 @@ func configureVpp() error {
 		}
 		log.Infof("Adding route %+v via VPP", newRoute)
 		err = netlink.RouteAdd(&newRoute)
-		if err != nil {
+		if err == syscall.EEXIST {
+			log.Warnf("cannot add route %+v via vpp, %+v", newRoute, err)
+		} else if err != nil {
 			return errors.Wrapf(err, "cannot add route %+v via vpp", newRoute)
 		}
 	}
@@ -556,12 +646,11 @@ func configureVpp() error {
 }
 
 func updateCalicoNode() error {
-	nodeName := os.Getenv("NODENAME")
 	client, err := calicocli.NewFromEnv()
 	if err != nil {
 		return errors.Wrap(err, "error creating calico client")
 	}
-	node, err := client.Nodes().Get(context.Background(), nodeName, calicoopts.GetOptions{})
+	node, err := client.Nodes().Get(context.Background(), params.nodeName, calicoopts.GetOptions{})
 	if err != nil {
 		return errors.Wrap(err, "cannot get current node from Calico")
 		// TODO create if doesn't exist? need to be careful to do it atomically... and everyone else must as well.
@@ -600,11 +689,11 @@ func updateCalicoNode() error {
 	updated, err := client.Nodes().Update(context.Background(), node, calicoopts.SetOptions{})
 	// TODO handle update error / retry if object changed in the meantime
 	log.Infof("updated node: %+v", updated)
-	return errors.Wrapf(err, "error updating node %s", nodeName)
+	return errors.Wrapf(err, "error updating node %s", params.nodeName)
 }
 
 // Returns VPP exit code
-func runVpp(confSource string) (int, error) {
+func runVpp() (int, error) {
 	err := prepareInterface()
 	// From this point it is very important that every exit path calls restoreLinuxConfig after vpp exits
 	if err != nil {
@@ -623,6 +712,9 @@ func runVpp(confSource string) (int, error) {
 	vppProcess = vppCmd.Process
 	log.Infof("VPP started. PID: %d", vppProcess.Pid)
 	runningCond.Broadcast()
+
+    // If needed, wait some time that vpp boots up
+	time.Sleep(time.Duration(params.vppStartupSleepSeconds) * time.Second)
 
 	// Configure VPP
 	err = configureVpp()
@@ -667,7 +759,13 @@ func configureContainer() error {
 }
 
 func main() {
-	err := configureContainer()
+	err := parseEnvVariables()
+	if err != nil {
+		log.Errorf("Error parsing env varibales: %+v", err)
+		return
+	}
+
+	err = configureContainer()
 	if err != nil {
 		log.Errorf("Error during initial config:")
 	}
@@ -676,25 +774,16 @@ func main() {
 
 	runningCond = sync.NewCond(&sync.Mutex{})
 	go handleSignals()
-	intf := os.Getenv(InterfaceEnvVar)
-	if intf == "" {
-		log.Errorf("No interface specified. Specify an interface through the %s environment variable", InterfaceEnvVar)
-		return
-	}
-	vppIpConfSource := os.Getenv(IpConfigEnvVar)
-	if vppIpConfSource != "linux" { // TODO add other sources
-		log.Errorf("No ip configuration source specified. Specify one of linux, [[calico or dhcp]] through the %s environment variable", IpConfigEnvVar)
-		return
-	}
-	err = getLinuxConfig(intf)
+
+	err = getLinuxConfig()
 	if err != nil {
 		log.Errorf("Error getting initial interface configuration: %s", err)
 		return
 	}
-	servicePrefixStr := os.Getenv(ServicePrefixEnvVar)
-	_, serviceNet, err = net.ParseCIDR(servicePrefixStr)
+
+	err = generateVppConfigExecFile()
 	if err != nil {
-		log.Errorf("invalid service prefix configuration: %s %s", servicePrefixStr, err)
+		log.Errorf("Error generating VPP config Exec: %s", err)
 		return
 	}
 	err = generateVppConfigFile()
@@ -702,7 +791,7 @@ func main() {
 		log.Errorf("Error generating VPP config: %s", err)
 		return
 	}
-	exitCode, err := runVpp(vppIpConfSource)
+	exitCode, err := runVpp()
 	if err != nil {
 		log.Errorf("Error running VPP: %v", err)
 	}

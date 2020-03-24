@@ -445,13 +445,19 @@ func routeAdd(ch vppapi.Channel, swIfIndex uint32, dst net.IPNet, gw net.IP) err
 	return nil
 }
 
-func removeInitialRoutes() {
+func removeInitialRoutes(link netlink.Link) {
 	for _, route := range initialConfig.routes {
 		log.Infof("deleting Route %s", route.String())
 		err := netlink.RouteDel(&route)
 		if err != nil {
 			log.Errorf("cannot delete route %+v: %+v", route, err)
 			// Keep going for the rest of the config
+		}
+	}
+	for _, addr := range initialConfig.addresses {
+		err := netlink.AddrDel(link, &addr)
+		if err != nil {
+			log.Errorf("error adding address %s to tap interface : %+v", addr, err)
 		}
 	}
 }
@@ -564,7 +570,7 @@ func configureVpp() error {
 	if err == nil {
 		isUp := (link.Attrs().Flags & net.FlagUp) != 0
 		if isUp {
-			removeInitialRoutes()
+			removeInitialRoutes(link)
 		}
 	}
 

@@ -46,6 +46,8 @@ import (
 const (
 	VppConfigFile            = "/etc/vpp/startup.conf"
 	VppConfigExecFile        = "/etc/vpp/startup.exec"
+	VppManagerStatusFile     = "/var/run/vpp/vppmanagerstatus"
+	VppManagerTapIdxFile     = "/var/run/vpp/vppmanagertap0"
 	VppApiSocket             = "/var/run/vpp/vpp-api.sock"
 	VppPath                  = "/usr/bin/vpp"
 	IpConfigEnvVar           = "CALICOVPP_IP_CONFIG"
@@ -221,6 +223,14 @@ func swapDriver(pciDevice, newDriver string) error {
 	err = ioutil.WriteFile(bindPath, []byte(pciDevice), 0200)
 	if err != nil {
 		return errors.Wrapf(err, "error binding %s to %s", pciDevice, newDriver)
+	}
+	return nil
+}
+
+func writeFile(state string, path string) error {
+	err := ioutil.WriteFile(path, []byte(state+"\n"), 0400)
+	if err != nil {
+		return errors.Errorf("Failed to write state to %s", path)
 	}
 	return nil
 }
@@ -542,6 +552,10 @@ func configureVpp() error {
 		return errors.Wrapf(err, "vpp tap creation failed with code %d. Request: %+v", response.Retval, request)
 	}
 	tapSwIfIndex := response.SwIfIndex
+	err = writeFile(strconv.FormatInt(int64(tapSwIfIndex), 10), VppManagerTapIdxFile)
+	if err != nil {
+		return errors.Wrap(err, "error writing tap idx")
+	}
 	err = setIntUp(ch, tapSwIfIndex)
 	if err != nil {
 		return errors.Wrap(err, "error setting tap up")
@@ -725,7 +739,7 @@ func runVpp() (int, error) {
 	log.Infof("VPP started. PID: %d", vppProcess.Pid)
 	runningCond.Broadcast()
 
-    // If needed, wait some time that vpp boots up
+	// If needed, wait some time that vpp boots up
 	time.Sleep(time.Duration(params.vppStartupSleepSeconds) * time.Second)
 
 	// Configure VPP
@@ -745,10 +759,10 @@ func runVpp() (int, error) {
 
 	go syncPools()
 
-	// TODO add something that can be checked by k8s health check when VPP is up
-	// or a flag to this program that checks both vpp status and the configuration status
-
+	writeFile("1", VppManagerStatusFile)
 	err = vppCmd.Wait()
+	clearVppManagerFiles()
+
 	exitCode := 0
 	log.Infof("VPP Exited: status %v", err)
 	switch e := err.(type) {
@@ -770,8 +784,21 @@ func configureContainer() error {
 	return errors.Wrap(err, "Error raising memlock limit, VPP may fail to start")
 }
 
+func clearVppManagerFiles() error {
+	err := writeFile("0", VppManagerStatusFile)
+	if err != nil {
+		return err
+	}
+	return writeFile("-1", VppManagerTapIdxFile)
+}
+
 func main() {
-	err := parseEnvVariables()
+	err := clearVppManagerFiles()
+	if err != nil {
+		log.Errorf("Error clearing config files: %+v", err)
+		return
+	}
+	err = parseEnvVariables()
 	if err != nil {
 		log.Errorf("Error parsing env varibales: %+v", err)
 		return

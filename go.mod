@@ -1,10 +1,10 @@
 module github.com/calico-vpp/vpp-manager
 
-go 1.12
+go 1.14
 
 require (
 	git.fd.io/govpp.git v0.2.0
-	github.com/calico-vpp/vpplink v0.0.0-20200318140048-669219d7fc75
+	github.com/calico-vpp/vpplink v0.0.0-20200327144446-5f5854c1b238
 	github.com/lunixbochs/struc v0.0.0-20190916212049-a5c72983bc42
 	github.com/pkg/errors v0.9.1
 	github.com/projectcalico/libcalico-go v1.7.2-0.20191112223013-362a04d5e109

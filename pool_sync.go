@@ -20,6 +20,7 @@ import (
 	"net"
 	"syscall"
 
+	"github.com/calico-vpp/vpplink"
 	"github.com/pkg/errors"
 	calicoapi "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	calicocli "github.com/projectcalico/libcalico-go/lib/clientv3"
@@ -30,43 +31,47 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-func poolAdded(network string) error {
+func getNetworkRoute(network string) (route *netlink.Route, err error) {
+	var gw net.IP
 	log.Infof("ip pool %s added", network)
 	_, cidr, err := net.ParseCIDR(network)
 	if err != nil {
-		return errors.Wrapf(err, "error parsing %s", network)
+		return nil, errors.Wrapf(err, "error parsing %s", network)
 	}
 
 	link, err := netlink.LinkByName(HostIfName)
 	if err != nil {
-		return errors.Wrapf(err, "cannot find interface named %s", HostIfName)
+		return nil, errors.Wrapf(err, "cannot find interface named %s", HostIfName)
 	}
 
-	err = netlink.RouteReplace(&netlink.Route{
+	if vpplink.IsIP4(cidr.IP) {
+		gw = params.vppTapIP4
+	} else {
+		gw = params.vppTapIP6
+	}
+
+	return &netlink.Route{
 		Dst:       cidr,
 		LinkIndex: link.Attrs().Index,
-		Gw:        params.vppTapAddr,
-	})
+		Gw:        gw,
+	}, nil
+}
+
+func poolAdded(network string) error {
+	route, err := getNetworkRoute(network)
+	if err != nil {
+		return errors.Wrap(err, "Error adding net")
+	}
+	err = netlink.RouteReplace(route)
 	return errors.Wrapf(err, "cannot add pool route %s through vpp tap", network)
 }
 
 func poolDeleted(network string) error {
-	log.Infof("ip pool %s deleted", network)
-	_, cidr, err := net.ParseCIDR(network)
+	route, err := getNetworkRoute(network)
 	if err != nil {
-		return errors.Wrapf(err, "error parsing %s", network)
+		return errors.Wrap(err, "Error deleting net")
 	}
-
-	link, err := netlink.LinkByName(HostIfName)
-	if err != nil {
-		return errors.Wrapf(err, "cannot find interface named %s", HostIfName)
-	}
-
-	err = netlink.RouteDel(&netlink.Route{
-		Dst:       cidr,
-		LinkIndex: link.Attrs().Index,
-		Gw:        params.vppTapAddr,
-	})
+	err = netlink.RouteDel(route)
 	return errors.Wrapf(err, "cannot delete pool route %s through vpp tap", network)
 }
 

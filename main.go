@@ -83,6 +83,10 @@ type interfaceConfig struct {
 
 type vppManagerParams struct {
 	vppStartupSleepSeconds  int
+	hasv4                   bool
+	hasv6                   bool
+	nodeIP4                 string
+	nodeIP6                 string
 	mainInterface           string
 	configExecTemplate      string
 	configTemplate          string
@@ -181,6 +185,15 @@ func handleSignals() {
 	}
 }
 
+func getNodeAddress(isV6 bool) string {
+	for _, addr := range initialConfig.addresses {
+		if vpplink.IsIP6(addr.IP) == isV6 {
+			return addr.IPNet.String()
+		}
+	}
+	return ""
+}
+
 func getLinuxConfig() error {
 	link, err := netlink.LinkByName(params.mainInterface)
 	if err != nil {
@@ -198,6 +211,15 @@ func getLinuxConfig() error {
 			return errors.Wrapf(err, "cannot list %s routes", params.mainInterface)
 		}
 	}
+	params.nodeIP4 = getNodeAddress(false)
+	params.nodeIP6 = getNodeAddress(true)
+	params.hasv4 = (params.nodeIP4 != "")
+	params.hasv6 = (params.nodeIP6 != "")
+	if !params.hasv4 && !params.hasv6 {
+		return errors.Errorf("no address found for node")
+	}
+	log.Infof("Node IP4 %s , Node IP6 %s", params.nodeIP4, params.nodeIP6)
+
 	// We allow PCI not to be found e.g for AF_PACKET
 	// Grab PCI id
 	deviceLinkPath := fmt.Sprintf("/sys/class/net/%s/device", params.mainInterface)
@@ -380,20 +402,35 @@ func removeInitialRoutes(link netlink.Link) {
 	}
 }
 
+func configurePunt(tapSwIfIndex uint32) (err error) {
+	if params.hasv4 {
+		log.Infof("Configuring ip4 punt")
+		err := vpp.PuntRedirect(vpplink.INVALID_SW_IF_INDEX, tapSwIfIndex, params.vppFakeNextHopIP4)
+		if err != nil {
+			return errors.Wrapf(err, "Error configuring ipv4 punt")
+		}
+	}
+	if params.hasv6 {
+		log.Infof("Configuring ip6 punt")
+		err := vpp.PuntRedirect(vpplink.INVALID_SW_IF_INDEX, tapSwIfIndex, params.vppFakeNextHopIP6)
+		if err != nil {
+			return errors.Wrapf(err, "Error configuring ipv6 punt")
+		}
+	}
+	return nil
+}
+
 func configureLinuxTap(link netlink.Link) (err error) {
 	err = netlink.LinkSetUp(link)
 	if err != nil {
 		return errors.Wrapf(err, "error setting tap %s up", HostIfName)
 	}
-	// Add /32 for each address configured on VPP side
+	// Add /32 or /128 for each address configured on VPP side
 	for _, addr := range initialConfig.addresses {
-		if addr.IP.To4() == nil {
-			continue // TODO
-		}
 		singleAddr := netlink.Addr{
 			IPNet: &net.IPNet{
 				IP:   addr.IP,
-				Mask: net.CIDRMask(32, 32),
+				Mask: getMaxCIDRMask(addr.IP),
 			},
 			Label: HostIfName,
 		}
@@ -414,27 +451,35 @@ func getMaxCIDRLen(isv6 bool) int {
 	}
 }
 
+func getMaxCIDRMask(addr net.IP) net.IPMask {
+	maxCIDRLen := getMaxCIDRLen(vpplink.IsIP6(addr))
+	return net.CIDRMask(maxCIDRLen, maxCIDRLen)
+}
+
 func safeAddInterfaceAddress(swIfIndex uint32, addr *net.IPNet) (err error) {
+	err = vpp.AddInterfaceAddress(swIfIndex, &net.IPNet{
+		IP:   addr.IP,
+		Mask: getMaxCIDRMask(addr.IP),
+	})
+	if err != nil {
+		return err
+	}
 	maskSize, _ := addr.Mask.Size()
 	if vpplink.IsIP6(addr.IP) && maskSize != 128 {
-		err = vpp.RouteAdd(&types.Route{
+		log.Infof("Adding extra route to %s for %d mask", addr, maskSize)
+		return vpp.RouteAdd(&types.Route{
 			SwIfIndex: swIfIndex,
 			Dst:       addr,
 		})
-		if err != nil {
-			return errors.Wrap(err, "Failed adding extra route for v6 local")
-		}
-		addr.Mask = net.CIDRMask(128, 128)
 	}
-	return vpp.AddInterfaceAddress(swIfIndex, addr)
+	return nil
 }
 
 func configureVppTap(link netlink.Link, tapSwIfIndex uint32, tapAddr net.IP, nxtHop net.IP, prefixLen int) (err error) {
-	maxCIDRLen := getMaxCIDRLen(vpplink.IsIP6(tapAddr))
 	// Do the actual VPP and Linux configuration
 	addr := &net.IPNet{
 		IP:   tapAddr,
-		Mask: net.CIDRMask(prefixLen, maxCIDRLen),
+		Mask: getMaxCIDRMask(tapAddr),
 	}
 	err = safeAddInterfaceAddress(tapSwIfIndex, addr)
 	if err != nil {
@@ -454,7 +499,7 @@ func configureVppTap(link netlink.Link, tapSwIfIndex uint32, tapAddr net.IP, nxt
 		LinkIndex: link.Attrs().Index,
 		Dst: &net.IPNet{
 			IP:   tapAddr,
-			Mask: net.CIDRMask(maxCIDRLen, maxCIDRLen),
+			Mask: getMaxCIDRMask(tapAddr),
 		},
 		Scope: netlink.SCOPE_LINK,
 	})
@@ -577,8 +622,7 @@ func configureVpp() (err error) {
 		return errors.Wrap(err, "error setting tap up")
 	}
 
-	// TODO : ip4 or ip6 ?
-	err = vpp.PuntRedirect(vpplink.INVALID_SW_IF_INDEX, tapSwIfIndex, params.vppFakeNextHopIP4)
+	err = configurePunt(tapSwIfIndex)
 	if err != nil {
 		return errors.Wrap(err, "error adding redirect to tap")
 	}
@@ -618,47 +662,38 @@ func configureVpp() (err error) {
 	return nil
 }
 
-func updateCalicoNode() error {
+func updateCalicoNode() (err error) {
+	var node *calicoapi.Node
 	client, err := calicocli.NewFromEnv()
 	if err != nil {
 		return errors.Wrap(err, "error creating calico client")
 	}
-	node, err := client.Nodes().Get(context.Background(), params.nodeName, calicoopts.GetOptions{})
+	// TODO create if doesn't exist? need to be careful to do it atomically... and everyone else must as well.
+	for i := 0; i < 10; i++ {
+		node, err = client.Nodes().Get(context.Background(), params.nodeName, calicoopts.GetOptions{})
+		if err == nil {
+			break
+		}
+		log.Warnf("Try [%d] cannot get current node from Calico %+v", i, err)
+		time.Sleep(1 * time.Second)
+	}
 	if err != nil {
 		return errors.Wrap(err, "cannot get current node from Calico")
-		// TODO create if doesn't exist? need to be careful to do it atomically... and everyone else must as well.
 	}
-	var currentConf string
-	if node.Spec.BGP == nil {
-		log.Infof("node currently has no BGP config")
-		currentConf = ""
-	} else {
-		currentConf = node.Spec.BGP.IPv4Address
-		log.Infof("current node IP configuration: %s", currentConf)
-	}
-	var nodeIP string
-	for _, a := range initialConfig.addresses {
-		if a.IP.To4() == nil {
-			continue // TODO handle IPv6
-		}
-		nodeIP = a.IPNet.String()
-		break
-	}
-	if nodeIP == "" {
-		return fmt.Errorf("no address found for node")
-	}
-	log.Infof("using %s as node IP for Calico", nodeIP)
-	if nodeIP == currentConf {
-		return nil // Nothing to do
-	}
+
 	// Update node with address
 	if node.Spec.BGP == nil {
-		node.Spec.BGP = &calicoapi.NodeBGPSpec{
-			IPv4Address: nodeIP,
-		}
-	} else {
-		node.Spec.BGP.IPv4Address = nodeIP
+		node.Spec.BGP = &calicoapi.NodeBGPSpec{}
 	}
+	if params.hasv4 {
+		log.Infof("Setting BGP V4 conf %s", params.nodeIP4)
+		node.Spec.BGP.IPv4Address = params.nodeIP4
+	}
+	if params.hasv6 {
+		log.Infof("Setting BGP V6 conf %s", params.nodeIP6)
+		node.Spec.BGP.IPv6Address = params.nodeIP6
+	}
+	log.Infof("updating node with: %+v", node)
 	updated, err := client.Nodes().Update(context.Background(), node, calicoopts.SetOptions{})
 	// TODO handle update error / retry if object changed in the meantime
 	log.Infof("updated node: %+v", updated)

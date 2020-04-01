@@ -273,7 +273,7 @@ func restoreLinuxConfig() (err error) {
 				}
 				time.Sleep(500 * time.Millisecond)
 			} else {
-				log.Debugf("found links %s after %d tries", params.mainInterface, retries)
+				log.Infof("found links %s after %d tries", params.mainInterface, retries)
 				break
 			}
 		}
@@ -287,7 +287,7 @@ func restoreLinuxConfig() (err error) {
 			log.Infof("restoring address %s", addr.String())
 			err := netlink.AddrAdd(link, &addr)
 			if err != nil {
-				log.Errorf("cannot add address %+v back to %s", addr, link.Attrs().Name)
+				log.Errorf("cannot add address %+v back to %s : %+v", addr, link.Attrs().Name, err)
 				failed = true
 				// Keep going for the rest of the config
 			}
@@ -296,7 +296,7 @@ func restoreLinuxConfig() (err error) {
 			log.Infof("restoring RouteList %s", route.String())
 			err := netlink.RouteAdd(&route)
 			if err != nil {
-				log.Errorf("cannot add route %+v back to %s", route, link.Attrs().Name)
+				log.Errorf("cannot add route %+v back to %s : %+v", route, link.Attrs().Name, err)
 				failed = true
 				// Keep going for the rest of the config
 			}
@@ -760,19 +760,25 @@ func runVpp() (int, error) {
 	go syncPools()
 
 	writeFile("1", VppManagerStatusFile)
-	err = vppCmd.Wait()
-	clearVppManagerFiles()
-
-	exitCode := 0
+	vppErr := vppCmd.Wait()
 	log.Infof("VPP Exited: status %v", err)
-	switch e := err.(type) {
-	case *exec.ExitError:
-		exitCode = e.ExitCode()
-	default:
-		log.Errorf("Error handling vpp process: %v", err)
+	err = clearVppManagerFiles()
+	if err != nil {
+		log.Errorf("Error clearing vpp manager files: %v", err)
 	}
-
-	return exitCode, errors.Wrap(restoreLinuxConfig(), "Error restoring linux config")
+	err = restoreLinuxConfig()
+	if err != nil {
+		log.Errorf("Error restoring linux config: %v", err)
+	}
+	switch e := vppErr.(type) {
+	case *exec.ExitError:
+		return e.ExitCode(), nil
+	case nil: // k8 cni removal
+		return 0, nil
+	default:
+		log.Errorf("Error handling vpp process: %v", vppErr)
+		return 0, nil
+	}
 }
 
 func configureContainer() error {

@@ -29,12 +29,8 @@ import (
 	"syscall"
 	"time"
 
-	"git.fd.io/govpp.git"
-	vppapi "git.fd.io/govpp.git/api"
-	vppcore "git.fd.io/govpp.git/core"
-	"github.com/calico-vpp/vpp-manager/vpp-1908-api/interfaces"
-	vppip "github.com/calico-vpp/vpp-manager/vpp-1908-api/ip"
-	"github.com/calico-vpp/vpp-manager/vpp-1908-api/tapv2"
+	"github.com/calico-vpp/vpplink"
+	"github.com/calico-vpp/vpplink/types"
 	"github.com/pkg/errors"
 	calicoapi "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	calicocli "github.com/projectcalico/libcalico-go/lib/clientv3"
@@ -44,32 +40,37 @@ import (
 )
 
 const (
-	VppConfigFile            = "/etc/vpp/startup.conf"
-	VppConfigExecFile        = "/etc/vpp/startup.exec"
-	VppManagerStatusFile     = "/var/run/vpp/vppmanagerstatus"
-	VppManagerTapIdxFile     = "/var/run/vpp/vppmanagertap0"
-	VppApiSocket             = "/var/run/vpp/vpp-api.sock"
-	VppPath                  = "/usr/bin/vpp"
-	IpConfigEnvVar           = "CALICOVPP_IP_CONFIG"
-	InterfaceEnvVar          = "CALICOVPP_INTERFACE"
-	ConfigTemplateEnvVar     = "CALICOVPP_CONFIG_TEMPLATE"
-	ConfigExecTemplateEnvVar = "CALICOVPP_CONFIG_EXEC_TEMPLATE"
-	VppStartupSleepEnvVar    = "CALICOVPP_VPP_STARTUP_SLEEP"
-	ServicePrefixEnvVar      = "SERVICE_PREFIX"
-	HostIfName               = "vpptap0"
-	HostIfTag                = "hosttap"
-	VppTapAddrPrefixLen      = 30
+	DataInterfaceSwIfIndex        = uint32(1) // Assumption: the VPP config ensures this is true
+	VppConfigFile                 = "/etc/vpp/startup.conf"
+	VppConfigExecFile             = "/etc/vpp/startup.exec"
+	VppManagerStatusFile          = "/var/run/vpp/vppmanagerstatus"
+	VppManagerTapIdxFile          = "/var/run/vpp/vppmanagertap0"
+	VppApiSocket                  = "/var/run/vpp/vpp-api.sock"
+	VppPath                       = "/usr/bin/vpp"
+	IpConfigEnvVar                = "CALICOVPP_IP_CONFIG"
+	InterfaceEnvVar               = "CALICOVPP_INTERFACE"
+	ConfigTemplateEnvVar          = "CALICOVPP_CONFIG_TEMPLATE"
+	ConfigExecTemplateEnvVar      = "CALICOVPP_CONFIG_EXEC_TEMPLATE"
+	VppStartupSleepEnvVar         = "CALICOVPP_VPP_STARTUP_SLEEP"
+	ServicePrefixEnvVar           = "SERVICE_PREFIX"
+	HostIfName                    = "vpptap0"
+	HostIfTag                     = "hosttap"
+	VppTapIP4PrefixLen            = 30
+	VppTapIP6PrefixLen            = 120
+	vppSideMacAddressString       = "02:00:00:00:00:02"
+	containerSideMacAddressString = "02:00:00:00:00:01"
+	vppFakeNextHopIP4String       = "169.254.254.254"
+	vppTapIP4String               = "169.254.254.253"
+	vppFakeNextHopIP6String       = "fe80:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+	vppTapIP6String               = "fe80:ffff:ffff:ffff:ffff:ffff:ffff:fffe"
 )
 
 var (
-	vppProcess              *os.Process
-	runningCond             *sync.Cond
-	initialConfig           interfaceConfig
-	params                  vppManagerParams
-	vppSideMacAddress       = [6]byte{2, 0, 0, 0, 0, 2}
-	containerSideMacAddress = [6]byte{2, 0, 0, 0, 0, 1}
-	vppFakeNextHopAddr      = net.IPv4(169, 254, 254, 254).To4()
-	vppTapAddr              = net.IPv4(169, 254, 254, 253).To4()
+	vppProcess    *os.Process
+	runningCond   *sync.Cond
+	initialConfig interfaceConfig
+	params        vppManagerParams
+	vpp           *vpplink.VppLink
 )
 
 type interfaceConfig struct {
@@ -81,13 +82,19 @@ type interfaceConfig struct {
 }
 
 type vppManagerParams struct {
-	vppStartupSleepSeconds int
-	mainInterface          string
-	configExecTemplate     string
-	configTemplate         string
-	nodeName               string
-	serviceNet             *net.IPNet
-	vppIpConfSource        string
+	vppStartupSleepSeconds  int
+	mainInterface           string
+	configExecTemplate      string
+	configTemplate          string
+	nodeName                string
+	serviceNet              *net.IPNet
+	vppIpConfSource         string
+	vppSideMacAddress       net.HardwareAddr
+	containerSideMacAddress net.HardwareAddr
+	vppFakeNextHopIP4       net.IP
+	vppTapIP4               net.IP
+	vppFakeNextHopIP6       net.IP
+	vppTapIP6               net.IP
 }
 
 func parseEnvVariables() (err error) {
@@ -128,6 +135,31 @@ func parseEnvVariables() (err error) {
 	params.vppIpConfSource = os.Getenv(IpConfigEnvVar)
 	if params.vppIpConfSource != "linux" { // TODO add other sources
 		return errors.Errorf("No ip configuration source specified. Specify one of linux, [[calico or dhcp]] through the %s environment variable", IpConfigEnvVar)
+	}
+
+	params.vppSideMacAddress, err = net.ParseMAC(vppSideMacAddressString)
+	if err != nil {
+		return errors.Wrapf(err, "Unable to parse mac: %s", vppSideMacAddressString)
+	}
+	params.containerSideMacAddress, err = net.ParseMAC(containerSideMacAddressString)
+	if err != nil {
+		return errors.Wrapf(err, "Unable to parse mac: %s", containerSideMacAddressString)
+	}
+	params.vppFakeNextHopIP4 = net.ParseIP(vppFakeNextHopIP4String)
+	if params.vppFakeNextHopIP4 == nil {
+		return errors.Errorf("Unable to parse IP: %s", vppFakeNextHopIP4String)
+	}
+	params.vppTapIP4 = net.ParseIP(vppTapIP4String)
+	if params.vppTapIP4 == nil {
+		return errors.Errorf("Unable to parse IP: %s", vppTapIP4String)
+	}
+	params.vppFakeNextHopIP6 = net.ParseIP(vppFakeNextHopIP6String)
+	if params.vppFakeNextHopIP6 == nil {
+		return errors.Errorf("Unable to parse IP: %s", vppFakeNextHopIP6String)
+	}
+	params.vppTapIP6 = net.ParseIP(vppTapIP6String)
+	if params.vppTapIP6 == nil {
+		return errors.Errorf("Unable to parse IP: %s", vppTapIP6String)
 	}
 	return nil
 }
@@ -331,130 +363,6 @@ func generateVppConfigFile() error {
 	)
 }
 
-func setIntUp(ch vppapi.Channel, swIfIndex uint32) (err error) {
-	AdminUpRequest := &interfaces.SwInterfaceSetFlags{
-		SwIfIndex:   swIfIndex,
-		AdminUpDown: 1,
-	}
-	AdminUpResponse := &interfaces.SwInterfaceSetFlagsReply{}
-
-	for i := 0; i < 10; i++ {
-		err = ch.SendRequest(AdminUpRequest).ReceiveReply(AdminUpResponse)
-		if err != nil || AdminUpResponse.Retval != 0 {
-			log.Warnf("Error trying to bring interface %d up (try %d/10): %d %v", swIfIndex, i+1, AdminUpResponse.Retval, err)
-			time.Sleep(time.Second)
-		} else {
-			return nil
-		}
-	}
-	return errors.Wrapf(err, "Error setting if %d up (retval %d)", swIfIndex, AdminUpResponse.Retval)
-}
-
-func addrAdd(ch vppapi.Channel, swIfIndex uint32, addr netlink.Addr) error {
-	prefLen, _ := addr.Mask.Size()
-	addrAddRequest := &interfaces.SwInterfaceAddDelAddress{
-		SwIfIndex:     swIfIndex,
-		IsAdd:         1,
-		AddressLength: uint8(prefLen),
-		Address:       addr.IP.To4(),
-	}
-	addrAddResponse := &interfaces.SwInterfaceAddDelAddressReply{}
-	err := ch.SendRequest(addrAddRequest).ReceiveReply(addrAddResponse)
-	if err != nil || addrAddResponse.Retval != 0 {
-		return fmt.Errorf("cannot add address %v to interface %d in VPP: %v %d",
-			addr, swIfIndex, err, addrAddResponse.Retval)
-	}
-	return nil
-}
-
-func toVppAddress(addr net.IP) vppip.Address {
-	a := vppip.Address{}
-	if addr.To4() == nil {
-		a.Af = vppip.ADDRESS_IP6
-		ip := [16]uint8{}
-		copy(ip[:], addr)
-		a.Un = vppip.AddressUnionIP6(ip)
-	} else {
-		a.Af = vppip.ADDRESS_IP4
-		ip := [4]uint8{}
-		copy(ip[:], addr.To4())
-		a.Un = vppip.AddressUnionIP4(ip)
-	}
-	return a
-}
-
-func neighAdd(ch vppapi.Channel, swIfIndex uint32, mac [6]byte, addr net.IP) error {
-	neighAddRequest := &vppip.IPNeighborAddDel{
-		IsAdd: 1,
-		Neighbor: vppip.IPNeighbor{
-			SwIfIndex:  swIfIndex,
-			Flags:      vppip.IP_API_NEIGHBOR_FLAG_STATIC,
-			MacAddress: mac,
-			IPAddress:  toVppAddress(addr),
-		},
-	}
-	neighAddReply := &vppip.IPNeighborAddDelReply{}
-	err := ch.SendRequest(neighAddRequest).ReceiveReply(neighAddReply)
-	if err != nil || neighAddReply.Retval != 0 {
-		return fmt.Errorf("cannot add neighbor in VPP: %v %d", err, neighAddReply.Retval)
-	}
-	return nil
-}
-
-func puntRedirect(ch vppapi.Channel, sourceSwIfIndex, destSwIfIndex uint32, nh net.IP) error {
-	puntRequest := &vppip.IPPuntRedirect{
-		Punt: vppip.PuntRedirect{
-			RxSwIfIndex: sourceSwIfIndex,
-			TxSwIfIndex: destSwIfIndex,
-			Nh:          toVppAddress(nh),
-		},
-		IsAdd: 1,
-	}
-	puntResponse := &vppip.IPPuntRedirectReply{}
-	err := ch.SendRequest(puntRequest).ReceiveReply(puntResponse)
-	if err != nil || puntResponse.Retval != 0 {
-		return fmt.Errorf("cannot set punt in VPP: %v %d", err, puntResponse.Retval)
-	}
-	return nil
-}
-
-func routeAdd(ch vppapi.Channel, swIfIndex uint32, dst net.IPNet, gw net.IP) error {
-	prefixLen, _ := dst.Mask.Size()
-	a := toVppAddress(gw)
-	request := &vppip.IPRouteAddDel{
-		IsAdd:       1,
-		IsMultipath: 0,
-		Route: vppip.IPRoute{
-			TableID: 0,
-			Prefix: vppip.Prefix{
-				Len:     uint8(prefixLen),
-				Address: toVppAddress(dst.IP),
-			},
-			Paths: []vppip.FibPath{
-				{
-					SwIfIndex:  swIfIndex,
-					TableID:    0,
-					RpfID:      0,
-					Weight:     1,
-					Preference: 0,
-					Type:       vppip.FIB_API_PATH_TYPE_NORMAL,
-					Flags:      vppip.FIB_API_PATH_FLAG_NONE,
-					Proto:      vppip.FIB_API_PATH_NH_PROTO_IP4,
-					Nh: vppip.FibPathNh{
-						Address: a.Un,
-					},
-				},
-			},
-		},
-	}
-	response := &vppip.IPRouteAddDelReply{}
-	err := ch.SendRequest(request).ReceiveReply(response)
-	if err != nil || response.Retval != 0 {
-		return fmt.Errorf("cannot add route %s via %s in VPP: %v %d", dst, gw, err, response.Retval)
-	}
-	return nil
-}
-
 func removeInitialRoutes(link netlink.Link) {
 	for _, route := range initialConfig.routes {
 		log.Infof("deleting Route %s", route.String())
@@ -472,127 +380,7 @@ func removeInitialRoutes(link netlink.Link) {
 	}
 }
 
-func configureVpp() error {
-	// Get an API connection, with a few retries to accomodate VPP startup time
-	var conn *vppcore.Connection
-	var err error
-	for i := 0; i < 10; i++ {
-		conn, err = govpp.Connect(VppApiSocket)
-		if err != nil {
-			log.Warnf("Cannot connect to VPP on socket %s try %d/10: %v", VppApiSocket, i, err)
-			time.Sleep(2 * time.Second)
-		} else {
-			break
-		}
-	}
-	if conn == nil {
-		return fmt.Errorf("cannot connect to VPP after 10 tries")
-	}
-	defer conn.Disconnect()
-
-	ch, err := conn.NewAPIChannel()
-	if err != nil {
-		log.Errorf("VPP API channel creation failed")
-		return fmt.Errorf("channel creation failed")
-	}
-	defer ch.Close()
-
-	// Do the actual VPP and Linux configuration
-
-	// Data interface configuration
-	dataIfIndex := uint32(1)
-	err = setIntUp(ch, dataIfIndex)
-	if err != nil {
-		return errors.Wrap(err, "error setting data interface up")
-	}
-	for _, addr := range initialConfig.addresses {
-		if addr.IP.To4() == nil {
-			continue
-		}
-		log.Infof("Adding address %s to data interface", addr.String())
-		err = addrAdd(ch, dataIfIndex, addr)
-		if err != nil {
-			return errors.Wrap(err, "error adding address to data interface")
-		}
-	}
-	for _, route := range initialConfig.routes {
-		// Only add routes with a next hop, assume the others come from interface addresses
-		if route.Gw == nil {
-			continue
-		}
-		if route.Dst == nil || route.Dst.IP.To4() == nil {
-			continue //TODO
-		}
-		err = routeAdd(ch, dataIfIndex, *route.Dst, route.Gw)
-		if err != nil {
-			return errors.Wrap(err, "cannot add route in vpp")
-		}
-	}
-
-	// Tap interface setup
-	response := &tapv2.TapCreateV2Reply{}
-	request := &tapv2.TapCreateV2{
-		ID:               ^uint32(0),
-		HostNamespaceSet: 0,
-		HostIfName:       []byte(HostIfName),
-		HostIfNameSet:    1,
-		Tag:              []byte(HostIfTag),
-		MacAddress:       vppSideMacAddress[:],
-		HostMacAddr:      containerSideMacAddress[:],
-		HostMacAddrSet:   1,
-	}
-	log.Infof("Creating Linux side interface")
-	err = ch.SendRequest(request).ReceiveReply(response)
-	if err != nil {
-		return errors.Wrap(err, "error creating tap in vpp")
-	} else if response.Retval != 0 {
-		return fmt.Errorf("error creating tap: retval %d", response.Retval)
-	}
-	if response.Retval != 0 {
-		return errors.Wrapf(err, "vpp tap creation failed with code %d. Request: %+v", response.Retval, request)
-	}
-	tapSwIfIndex := response.SwIfIndex
-	err = writeFile(strconv.FormatInt(int64(tapSwIfIndex), 10), VppManagerTapIdxFile)
-	if err != nil {
-		return errors.Wrap(err, "error writing tap idx")
-	}
-	err = setIntUp(ch, tapSwIfIndex)
-	if err != nil {
-		return errors.Wrap(err, "error setting tap up")
-	}
-	addr := &netlink.Addr{
-		IPNet: &net.IPNet{
-			IP:   vppTapAddr,
-			Mask: net.CIDRMask(VppTapAddrPrefixLen, 32),
-		},
-	}
-	err = addrAdd(ch, tapSwIfIndex, *addr)
-	if err != nil {
-		return errors.Wrap(err, "error adding address to tap")
-	}
-	err = neighAdd(ch, tapSwIfIndex, containerSideMacAddress, vppFakeNextHopAddr)
-	if err != nil {
-		return errors.Wrap(err, "error adding neighbor to tap")
-	}
-	err = puntRedirect(ch, ^uint32(0), tapSwIfIndex, vppFakeNextHopAddr)
-	if err != nil {
-		return errors.Wrap(err, "error adding redirect to tap")
-	}
-
-	// If main interface flush its routes or they'll conflict with $HostIfName
-	link, err := netlink.LinkByName(params.mainInterface)
-	if err == nil {
-		isUp := (link.Attrs().Flags & net.FlagUp) != 0
-		if isUp {
-			removeInitialRoutes(link)
-		}
-	}
-
-	// Linux side tap setup
-	link, err = netlink.LinkByName(HostIfName)
-	if err != nil {
-		return errors.Wrapf(err, "cannot find interface named %s", HostIfName)
-	}
+func configureLinuxTap(link netlink.Link) (err error) {
 	err = netlink.LinkSetUp(link)
 	if err != nil {
 		return errors.Wrapf(err, "error setting tap %s up", HostIfName)
@@ -615,12 +403,58 @@ func configureVpp() error {
 			return errors.Wrapf(err, "error adding address %s to tap interface", singleAddr)
 		}
 	}
+	return nil
+}
+
+func getMaxCIDRLen(isv6 bool) int {
+	if isv6 {
+		return 128
+	} else {
+		return 32
+	}
+}
+
+func safeAddInterfaceAddress(swIfIndex uint32, addr *net.IPNet) (err error) {
+	maskSize, _ := addr.Mask.Size()
+	if vpplink.IsIP6(addr.IP) && maskSize != 128 {
+		err = vpp.RouteAdd(&types.Route{
+			SwIfIndex: swIfIndex,
+			Dst:       addr,
+		})
+		if err != nil {
+			return errors.Wrap(err, "Failed adding extra route for v6 local")
+		}
+		addr.Mask = net.CIDRMask(128, 128)
+	}
+	return vpp.AddInterfaceAddress(swIfIndex, addr)
+}
+
+func configureVppTap(link netlink.Link, tapSwIfIndex uint32, tapAddr net.IP, nxtHop net.IP, prefixLen int) (err error) {
+	maxCIDRLen := getMaxCIDRLen(vpplink.IsIP6(tapAddr))
+	// Do the actual VPP and Linux configuration
+	addr := &net.IPNet{
+		IP:   tapAddr,
+		Mask: net.CIDRMask(prefixLen, maxCIDRLen),
+	}
+	err = safeAddInterfaceAddress(tapSwIfIndex, addr)
+	if err != nil {
+		return errors.Wrap(err, "error adding address to tap")
+	}
+	err = vpp.AddNeighbor(&types.Neighbor{
+		SwIfIndex:    tapSwIfIndex,
+		IP:           nxtHop,
+		HardwareAddr: params.containerSideMacAddress,
+	})
+	if err != nil {
+		return errors.Wrap(err, "error adding neighbor to tap")
+	}
+
 	// "dummy" next-hop directly connected on the tap interface (route + neighbor)
 	err = netlink.RouteAdd(&netlink.Route{
 		LinkIndex: link.Attrs().Index,
 		Dst: &net.IPNet{
-			IP:   vppTapAddr,
-			Mask: net.CIDRMask(32, 32),
+			IP:   tapAddr,
+			Mask: net.CIDRMask(maxCIDRLen, maxCIDRLen),
 		},
 		Scope: netlink.SCOPE_LINK,
 	})
@@ -630,32 +464,34 @@ func configureVpp() error {
 	err = netlink.NeighAdd(&netlink.Neigh{
 		LinkIndex:    link.Attrs().Index,
 		State:        netlink.NUD_PERMANENT,
-		IP:           vppTapAddr,
-		HardwareAddr: vppSideMacAddress[:],
+		IP:           tapAddr,
+		HardwareAddr: params.vppSideMacAddress[:],
 	})
 	if err != nil {
 		return errors.Wrap(err, "cannot add neighbor to tap")
 	}
-	// Add a route for the service prefix through VPP
-	log.Infof("adding route to service prefix %s through VPP", params.serviceNet.String())
-	err = netlink.RouteAdd(&netlink.Route{
-		Dst:       params.serviceNet,
-		LinkIndex: link.Attrs().Index,
-		Gw:        vppTapAddr,
-	})
-	if err != nil {
-		return errors.Wrap(err, "cannot add service route to tap")
+	if vpplink.IsIP4(params.serviceNet.IP) == vpplink.IsIP4(tapAddr) {
+		// Add a route for the service prefix through VPP
+		log.Infof("adding route to service prefix %s through VPP", params.serviceNet.String())
+		err = netlink.RouteAdd(&netlink.Route{
+			Dst:       params.serviceNet,
+			LinkIndex: link.Attrs().Index,
+			Gw:        tapAddr,
+		})
+		if err != nil {
+			return errors.Wrap(err, "cannot add service route to tap")
+		}
 	}
 
 	// All routes that were on this interface now go through VPP
 	for _, route := range initialConfig.routes {
-		if route.Dst == nil || route.Dst.IP.To4() == nil {
-			continue //TODO
+		if route.Dst == nil || vpplink.IsIP4(route.Dst.IP) != vpplink.IsIP4(tapAddr) {
+			continue
 		}
 		newRoute := netlink.Route{
 			Dst:       route.Dst,
 			LinkIndex: link.Attrs().Index,
-			Gw:        vppTapAddr,
+			Gw:        tapAddr,
 		}
 		log.Infof("Adding route %+v via VPP", newRoute)
 		err = netlink.RouteAdd(&newRoute)
@@ -663,6 +499,117 @@ func configureVpp() error {
 			log.Warnf("cannot add route %+v via vpp, %+v", newRoute, err)
 		} else if err != nil {
 			return errors.Wrapf(err, "cannot add route %+v via vpp", newRoute)
+		}
+	}
+	return nil
+}
+
+func createVppLink() (vpp *vpplink.VppLink, err error) {
+	// Get an API connection, with a few retries to accomodate VPP startup time
+	for i := 0; i < 10; i++ {
+		vpp, err = vpplink.NewVppLink(VppApiSocket, log.WithFields(log.Fields{"component": "vpp-api"}))
+		if err != nil {
+			log.Warnf("Cannot connect to VPP on socket %s try %d/10: %v", VppApiSocket, i, err)
+			err = nil
+			time.Sleep(2 * time.Second)
+		} else {
+			break
+		}
+	}
+	return vpp, err
+}
+
+func configureVpp() (err error) {
+	vpp, err = createVppLink()
+	if err != nil {
+		return fmt.Errorf("cannot connect to VPP after 10 tries")
+	}
+	defer vpp.Close()
+
+	// Data interface configuration
+	err = vpp.Retry(2*time.Second, 10, vpp.InterfaceAdminUp, DataInterfaceSwIfIndex)
+	if err != nil {
+		return errors.Wrap(err, "error setting data interface up")
+	}
+	err = vpp.EnableInterfaceIP6(DataInterfaceSwIfIndex)
+	if err != nil {
+		return errors.Wrap(err, "error enabling ip6 on if")
+	}
+	for _, addr := range initialConfig.addresses {
+		log.Infof("Adding address %s to data interface", addr.String())
+		err = safeAddInterfaceAddress(DataInterfaceSwIfIndex, addr.IPNet)
+		if err != nil {
+			return errors.Wrap(err, "error adding address to data interface")
+		}
+	}
+	for _, route := range initialConfig.routes {
+		// Only add routes with a next hop, assume the others come from interface addresses
+		if route.Gw == nil || route.Dst == nil {
+			continue
+		}
+		err = vpp.RouteAdd(&types.Route{
+			SwIfIndex: DataInterfaceSwIfIndex,
+			Dst:       route.Dst,
+			Gw:        route.Gw,
+		})
+		if err != nil {
+			return errors.Wrap(err, "cannot add route in vpp")
+		}
+	}
+
+	log.Infof("Creating Linux side interface")
+	tapSwIfIndex, err := vpp.CreateTapV2(&types.TapV2{
+		HostIfName:     HostIfName,
+		Tag:            HostIfTag,
+		MacAddress:     params.vppSideMacAddress,
+		HostMacAddress: params.containerSideMacAddress,
+	})
+	if err != nil {
+		return errors.Wrap(err, "error creating tap")
+	}
+	err = writeFile(strconv.FormatInt(int64(tapSwIfIndex), 10), VppManagerTapIdxFile)
+	if err != nil {
+		return errors.Wrap(err, "error writing tap idx")
+	}
+
+	err = vpp.InterfaceAdminUp(tapSwIfIndex)
+	if err != nil {
+		return errors.Wrap(err, "error setting tap up")
+	}
+
+	// TODO : ip4 or ip6 ?
+	err = vpp.PuntRedirect(vpplink.INVALID_SW_IF_INDEX, tapSwIfIndex, params.vppFakeNextHopIP4)
+	if err != nil {
+		return errors.Wrap(err, "error adding redirect to tap")
+	}
+
+	// Linux side tap setup
+	link, err := netlink.LinkByName(HostIfName)
+	if err != nil {
+		return errors.Wrapf(err, "cannot find interface named %s", HostIfName)
+	}
+
+	err = configureLinuxTap(link)
+	if err != nil {
+		return errors.Wrap(err, "error configure tap linux side")
+	}
+
+	err = configureVppTap(link, tapSwIfIndex, params.vppTapIP4, params.vppFakeNextHopIP4, VppTapIP4PrefixLen)
+	if err != nil {
+		return errors.Wrap(err, "error configuring vpp side ipv4 tap")
+	}
+
+	err = configureVppTap(link, tapSwIfIndex, params.vppTapIP6, params.vppFakeNextHopIP6, VppTapIP6PrefixLen)
+	if err != nil {
+		return errors.Wrap(err, "error configuring vpp side ipv6 tap")
+	}
+
+	// If main interface is still up flush its routes or they'll conflict with $HostIfName
+	link, err = netlink.LinkByName(params.mainInterface)
+	if err == nil {
+		isUp := (link.Attrs().Flags & net.FlagUp) != 0
+		if isUp {
+			removeInitialRoutes(link)
 		}
 	}
 

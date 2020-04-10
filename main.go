@@ -173,6 +173,7 @@ func handleSignals() {
 	signal.Notify(signals)
 	for {
 		s := <-signals
+		log.Infof("Received signal %+v", s)
 		if vppProcess == nil {
 			runningCond.L.Lock()
 			for vppProcess == nil {
@@ -180,8 +181,13 @@ func handleSignals() {
 			}
 			runningCond.L.Unlock()
 		}
-		// Just forward all signals to VPP
+		// Forward signals to VPP - special case
+		// for SIGTERM, which doesn't kill vpp quick enough
+		if s == syscall.SIGTERM {
+			s = syscall.SIGINT
+		}
 		vppProcess.Signal(s)
+		log.Infof("Signaled vpp with %+v", s)
 	}
 }
 
@@ -338,6 +344,10 @@ func restoreLinuxConfig() (err error) {
 		// Re-add all adresses and routes
 		failed := false
 		for _, addr := range initialConfig.addresses {
+			if vpplink.IsIP6(addr.IP) && addr.IP.IsLinkLocalUnicast() {
+				log.Infof("Skipping linklocal address %s", addr.String())
+				continue
+			}
 			log.Infof("restoring address %s", addr.String())
 			err := netlink.AddrAdd(link, &addr)
 			if err != nil {
@@ -347,7 +357,12 @@ func restoreLinuxConfig() (err error) {
 			}
 		}
 		for _, route := range initialConfig.routes {
-			log.Infof("restoring RouteList %s", route.String())
+			if vpplink.IsIP6(route.Dst.IP) && route.Dst.IP.IsLinkLocalUnicast() {
+				log.Infof("Skipping linklocal route %s", route.String())
+				continue
+			}
+			log.Infof("restoring route %s", route.String())
+			route.LinkIndex = link.Attrs().Index
 			err := netlink.RouteAdd(&route)
 			if err != nil {
 				log.Errorf("cannot add route %+v back to %s : %+v", route, link.Attrs().Name, err)
@@ -457,22 +472,22 @@ func getMaxCIDRMask(addr net.IP) net.IPMask {
 }
 
 func safeAddInterfaceAddress(swIfIndex uint32, addr *net.IPNet) (err error) {
-	err = vpp.AddInterfaceAddress(swIfIndex, &net.IPNet{
-		IP:   addr.IP,
-		Mask: getMaxCIDRMask(addr.IP),
-	})
-	if err != nil {
-		return err
-	}
 	maskSize, _ := addr.Mask.Size()
 	if vpplink.IsIP6(addr.IP) && maskSize != 128 {
+		err = vpp.AddInterfaceAddress(swIfIndex, &net.IPNet{
+			IP:   addr.IP,
+			Mask: getMaxCIDRMask(addr.IP),
+		})
+		if err != nil {
+			return err
+		}
 		log.Infof("Adding extra route to %s for %d mask", addr, maskSize)
 		return vpp.RouteAdd(&types.Route{
 			SwIfIndex: swIfIndex,
 			Dst:       addr,
 		})
 	}
-	return nil
+	return vpp.AddInterfaceAddress(swIfIndex, addr)
 }
 
 func configureVppTap(link netlink.Link, tapSwIfIndex uint32, tapAddr net.IP, nxtHop net.IP, prefixLen int) (err error) {
@@ -558,10 +573,10 @@ func createVppLink() (vpp *vpplink.VppLink, err error) {
 			err = nil
 			time.Sleep(2 * time.Second)
 		} else {
-			break
+			return vpp, nil
 		}
 	}
-	return vpp, err
+	return nil, errors.Errorf("Cannot connect to VPP after 10 tries")
 }
 
 func configureVpp() (err error) {

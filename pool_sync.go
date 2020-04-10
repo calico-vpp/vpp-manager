@@ -79,6 +79,7 @@ func poolSyncError(err error) error {
 	log.Errorf("Pool synchronisation error: %v", err)
 	// Tell VPP to exit so this program stops
 	vppProcess.Signal(syscall.SIGINT)
+	log.Errorf("Signaled underlying vpp process")
 	return nil
 }
 

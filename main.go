@@ -599,7 +599,7 @@ func configureVpp() (err error) {
 		log.Infof("Adding address %s to data interface", addr.String())
 		err = safeAddInterfaceAddress(DataInterfaceSwIfIndex, addr.IPNet)
 		if err != nil {
-			return errors.Wrap(err, "error adding address to data interface")
+			log.Errorf("error adding address to data interface: %v", err)
 		}
 	}
 	for _, route := range initialConfig.routes {
@@ -613,7 +613,7 @@ func configureVpp() (err error) {
 			Gw:        route.Gw,
 		})
 		if err != nil {
-			return errors.Wrap(err, "cannot add route in vpp")
+			log.Errorf("cannot add route in vpp: %v", err)
 		}
 	}
 

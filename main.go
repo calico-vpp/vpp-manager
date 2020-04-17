@@ -357,7 +357,7 @@ func restoreLinuxConfig() (err error) {
 			}
 		}
 		for _, route := range initialConfig.routes {
-			if vpplink.IsIP6(route.Dst.IP) && route.Dst.IP.IsLinkLocalUnicast() {
+			if route.Dst != nil && vpplink.IsIP6(route.Dst.IP) && route.Dst.IP.IsLinkLocalUnicast() {
 				log.Infof("Skipping linklocal route %s", route.String())
 				continue
 			}
@@ -617,6 +617,15 @@ func configureVpp() (err error) {
 		}
 	}
 
+	// If main interface is still up flush its routes or they'll conflict with $HostIfName
+	link, err = netlink.LinkByName(params.mainInterface)
+	if err == nil {
+		isUp := (link.Attrs().Flags & net.FlagUp) != 0
+		if isUp {
+			removeInitialRoutes(link)
+		}
+	}
+
 	log.Infof("Creating Linux side interface")
 	tapSwIfIndex, err := vpp.CreateTapV2(&types.TapV2{
 		HostIfName:     HostIfName,
@@ -661,15 +670,6 @@ func configureVpp() (err error) {
 	err = configureVppTap(link, tapSwIfIndex, params.vppTapIP6, params.vppFakeNextHopIP6, VppTapIP6PrefixLen)
 	if err != nil {
 		return errors.Wrap(err, "error configuring vpp side ipv6 tap")
-	}
-
-	// If main interface is still up flush its routes or they'll conflict with $HostIfName
-	link, err = netlink.LinkByName(params.mainInterface)
-	if err == nil {
-		isUp := (link.Attrs().Flags & net.FlagUp) != 0
-		if isUp {
-			removeInitialRoutes(link)
-		}
 	}
 
 	// TODO should watch for service prefix and ip pools to always route them through VPP

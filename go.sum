@@ -24,6 +24,8 @@ github.com/calico-vpp/vpplink v0.0.0-20200327144446-5f5854c1b238 h1:raFeflJSKDl2
 github.com/calico-vpp/vpplink v0.0.0-20200327144446-5f5854c1b238/go.mod h1:tQZQeD5jrPJoq8v/VpVl3WK/OMmEIJbOHIzUWoZW1QU=
 github.com/calico-vpp/vpplink v0.0.0-20200423162742-e79502facdf6 h1:0EhWuhMqBBEHBvTU8jDpjP5iYDWQxdpeAHr3zHFL3/I=
 github.com/calico-vpp/vpplink v0.0.0-20200423162742-e79502facdf6/go.mod h1:tQZQeD5jrPJoq8v/VpVl3WK/OMmEIJbOHIzUWoZW1QU=
+github.com/calico-vpp/vpplink v0.0.0-20200424163352-9c40724b360f h1:8k3CfnWhUH9zEu4qKhlQ92+UvzK2zXNdIWkM1ukdAKU=
+github.com/calico-vpp/vpplink v0.0.0-20200424163352-9c40724b360f/go.mod h1:XTN1gO6hiGU5wsrufaFMODcu4Puaief2iRsj+V/iIYY=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
 github.com/coreos/bbolt v1.3.3 h1:n6AiVyVRKQFNb6mJlwESEvvLoDyiTzXX7ORAUlkeBdY=
 github.com/coreos/bbolt v1.3.3/go.mod h1:iRUV2dpdMOn7Bo10OQBFzIJO9kkE559Wcmn+qkEiiKk=

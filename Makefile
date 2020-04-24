@@ -19,7 +19,7 @@ imageonly: build
 		-t calicovpp/vpp:latest $(IMAGE_DIR)
 
 vpp:
-	$(VPPLINK_DIR)/binapi/vpp_clone_current.sh ./vpp_build
+	bash $(VPPLINK_DIR)/binapi/vpp_clone_current.sh ./vpp_build
 	cd vpp_build;                                          \
 	make install-dep;                                      \
 	git apply ../vpp-build.patch;                          \
@@ -28,8 +28,6 @@ vpp:
 	git apply -R ../vpp-build.patch;                       \
 	rm -f ../$(IMAGE_DIR)*.deb;                              \
     cp ./build-root/vpp_*.deb ../$(IMAGE_DIR) ;               \
-    cp ./build-root/vpp-dev_*.deb ../$(IMAGE_DIR) ;           \
     cp ./build-root/vpp-plugin-core_*.deb ../$(IMAGE_DIR) ;   \
     cp ./build-root/vpp-plugin-dpdk_*.deb ../$(IMAGE_DIR) ;   \
-    cp ./build-root/libvppinfra_*.deb ../$(IMAGE_DIR) ;       \
-    cp ./build-root/libvppinfra-dev_*.deb ../$(IMAGE_DIR)
+    cp ./build-root/libvppinfra_*.deb ../$(IMAGE_DIR)

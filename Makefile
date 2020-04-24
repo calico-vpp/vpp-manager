@@ -8,6 +8,6 @@ build:
 
 
 image: build
-	docker build -t calicovpp/vpp:latest .
+	docker build --pull --build-arg http_proxy=${DOCKER_BUILD_PROXY} -t calicovpp/vpp:latest .
 
 

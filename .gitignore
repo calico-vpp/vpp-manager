@@ -2,6 +2,9 @@ vpp-manager
 
 *.out
 *.test
+*.deb
+
+vpp_build/
 
 .vscode
 

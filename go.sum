@@ -3,6 +3,8 @@ cloud.google.com/go v0.34.0 h1:eOI3/cP2VTU6uZLDYAoic+eyzzB9YyGmJ7eIjl8rOPg=
 cloud.google.com/go v0.34.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
 git.fd.io/govpp.git v0.2.0 h1:bBDRSJj4TtVjbVww5QGk0QAJEMkGNCLis9Nru2hCnPQ=
 git.fd.io/govpp.git v0.2.0/go.mod h1:cJ7XSNm8O4jeU1dLgOacRoHt5MxlL+XPgas1yBC53gc=
+git.fd.io/govpp.git v0.3.4 h1:IycjZ2GzvSvPiwy6+jKzhH18ySohGOILIVmWy3m5r2Q=
+git.fd.io/govpp.git v0.3.4/go.mod h1:SaURD+s2tyKdTyPdzAiHaoHwG6KEzIkPY1ZOdxU63qU=
 github.com/Azure/go-autorest v11.1.2+incompatible h1:viZ3tV5l4gE2Sw0xrasFHytCGtzYCrT+um/rrSQ1BfA=
 github.com/Azure/go-autorest v11.1.2+incompatible/go.mod h1:r+4oMnoxhatjLLJ6zxSWATqVooLgysK6ZNox3g/xq24=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
@@ -13,6 +15,7 @@ github.com/PuerkitoBio/purell v1.1.1/go.mod h1:c11w/QuzBsJSee3cPx9rAFu61PvFxuPbt
 github.com/PuerkitoBio/urlesc v0.0.0-20160726150825-5bd2802263f2/go.mod h1:uGdkoq3SwY9Y+13GIhn11/XLaGBb4BfwItxLd5jeuXE=
 github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578/go.mod h1:uGdkoq3SwY9Y+13GIhn11/XLaGBb4BfwItxLd5jeuXE=
 github.com/bennyscetbun/jsongo v0.0.0-20160422144625-5240b3f82c66/go.mod h1:suxbVmjBV8+A2BBAM5EYVh6Uj8j3rqJhzWf3hv7Ff8U=
+github.com/bennyscetbun/jsongo v1.1.0/go.mod h1:suxbVmjBV8+A2BBAM5EYVh6Uj8j3rqJhzWf3hv7Ff8U=
 github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973 h1:xJ4a3vCFaGF/jqvzLMYoU8P317H5OQ+Via4RmuPwCS0=
 github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973/go.mod h1:Dwedo/Wpr24TaqPxmxbtue+5NUziq4I4S80YR8gNf3Q=
 github.com/calico-vpp/vpplink v0.0.0-20200326145516-21dd5660c581 h1:ePj4e+lC/1QXMuLfKV2W+e4srJu/LArfCSU2P/swZfI=
@@ -21,6 +24,8 @@ github.com/calico-vpp/vpplink v0.0.0-20200327144446-5f5854c1b238 h1:raFeflJSKDl2
 github.com/calico-vpp/vpplink v0.0.0-20200327144446-5f5854c1b238/go.mod h1:tQZQeD5jrPJoq8v/VpVl3WK/OMmEIJbOHIzUWoZW1QU=
 github.com/calico-vpp/vpplink v0.0.0-20200423162742-e79502facdf6 h1:0EhWuhMqBBEHBvTU8jDpjP5iYDWQxdpeAHr3zHFL3/I=
 github.com/calico-vpp/vpplink v0.0.0-20200423162742-e79502facdf6/go.mod h1:tQZQeD5jrPJoq8v/VpVl3WK/OMmEIJbOHIzUWoZW1QU=
+github.com/calico-vpp/vpplink v0.0.0-20200424163352-9c40724b360f h1:8k3CfnWhUH9zEu4qKhlQ92+UvzK2zXNdIWkM1ukdAKU=
+github.com/calico-vpp/vpplink v0.0.0-20200424163352-9c40724b360f/go.mod h1:XTN1gO6hiGU5wsrufaFMODcu4Puaief2iRsj+V/iIYY=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
 github.com/coreos/bbolt v1.3.3 h1:n6AiVyVRKQFNb6mJlwESEvvLoDyiTzXX7ORAUlkeBdY=
 github.com/coreos/bbolt v1.3.3/go.mod h1:iRUV2dpdMOn7Bo10OQBFzIJO9kkE559Wcmn+qkEiiKk=

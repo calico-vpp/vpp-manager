@@ -579,6 +579,42 @@ func createVppLink() (vpp *vpplink.VppLink, err error) {
 	return nil, errors.Errorf("Cannot connect to VPP after 10 tries")
 }
 
+func addExtraAddresses(addrList []netlink.Addr) (err error) {
+	extraAddrConf := os.Getenv("CALICOVPP_CONFIGURE_EXTRA_ADDRESSES")
+	if extraAddrConf == "" {
+		log.Infof("Not configuring extra addresses")
+		return nil
+	}
+	extraAddr, err := strconv.ParseInt(extraAddrConf, 10, 8)
+	if extraAddr == 0 {
+		return fmt.Errorf("CALICOVPP_CONFIGURE_EXTRA_ADDRESSES parses to 0: %v", err)
+	}
+	log.Infof("Adding %d extra addresses", extraAddr)
+	v4Count := 0
+	var addr net.IPNet
+	for _, a := range addrList {
+		if a.IP.To4() != nil {
+			v4Count++
+			addr = *a.IPNet
+		}
+	}
+	if v4Count != 1 {
+		return fmt.Errorf("%d IPv4 addresses found, not configuring extra addresses (need exactly 1)", v4Count)
+	}
+	for i := int64(1); i <= extraAddr; i++ {
+		a := &net.IPNet{
+			IP:   net.IP(append([]byte(nil), addr.IP.To4()...)),
+			Mask: addr.Mask,
+		}
+		a.IP[2] += byte(i)
+		err = safeAddInterfaceAddress(DataInterfaceSwIfIndex, a)
+		if err != nil {
+			log.Errorf("error adding address to data interface: %v", err)
+		}
+	}
+	return nil
+}
+
 func configureVpp() (err error) {
 	vpp, err = createVppLink()
 	if err != nil {
@@ -623,6 +659,10 @@ func configureVpp() (err error) {
 		if err != nil {
 			log.Errorf("cannot add route in vpp: %v", err)
 		}
+	}
+	err = addExtraAddresses(initialConfig.addresses)
+	if err != nil {
+		log.Errorf("Cannot configure requested extra addresses: %v", err)
 	}
 
 	// If main interface is still up flush its routes or they'll conflict with $HostIfName

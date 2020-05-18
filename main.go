@@ -383,11 +383,21 @@ func generateVppConfigExecFile() error {
 	}
 	// Trivial rendering for the moment...
 	template := strings.ReplaceAll(params.configExecTemplate, "__VPP_DATAPLANE_IF__", params.mainInterface)
-	return errors.Wrapf(
-		ioutil.WriteFile(VppConfigExecFile, []byte(template), 0644),
+	err := errors.Wrapf(
+		ioutil.WriteFile(VppConfigExecFile, []byte(template), 0744),
 		"error writing VPP Exec configuration to %s",
 		VppConfigFile,
 	)
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(params.configExecTemplate, "#!/bin/bash") {
+		cmd := exec.Command("/bin/bash", VppConfigExecFile)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err = cmd.Start()
+	}
+	return err
 }
 
 func generateVppConfigFile() error {
@@ -483,8 +493,10 @@ func safeAddInterfaceAddress(swIfIndex uint32, addr *net.IPNet) (err error) {
 		}
 		log.Infof("Adding extra route to %s for %d mask", addr, maskSize)
 		return vpp.RouteAdd(&types.Route{
-			SwIfIndex: swIfIndex,
-			Dst:       addr,
+			Dst: addr,
+			Paths: []types.RoutePath{{
+				SwIfIndex: swIfIndex,
+			}},
 		})
 	}
 	return vpp.AddInterfaceAddress(swIfIndex, addr)
@@ -639,6 +651,7 @@ func configureVpp() (err error) {
 	if err != nil {
 		return errors.Wrap(err, "error enabling ip6 on if")
 	}
+
 	for _, addr := range initialConfig.addresses {
 		log.Infof("Adding address %s to data interface", addr.String())
 		err = safeAddInterfaceAddress(DataInterfaceSwIfIndex, addr.IPNet)
@@ -652,9 +665,11 @@ func configureVpp() (err error) {
 			continue
 		}
 		err = vpp.RouteAdd(&types.Route{
-			SwIfIndex: DataInterfaceSwIfIndex,
-			Dst:       route.Dst,
-			Gw:        route.Gw,
+			Dst: route.Dst,
+			Paths: []types.RoutePath{{
+				Gw:        route.Gw,
+				SwIfIndex: DataInterfaceSwIfIndex,
+			}},
 		})
 		if err != nil {
 			log.Errorf("cannot add route in vpp: %v", err)

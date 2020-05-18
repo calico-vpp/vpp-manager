@@ -679,6 +679,14 @@ func configureVpp() (err error) {
 	if err != nil {
 		log.Errorf("Cannot configure requested extra addresses: %v", err)
 	}
+	err = vpp.SetIPFlowHash(0, false, true, true, true, true, false, false, true)
+	if err != nil {
+		log.Errorf("cannot configure flow hash: %v", err)
+	}
+	err = vpp.SetIPFlowHash(0, true, true, true, true, true, false, false, true)
+	if err != nil {
+		log.Errorf("cannot configure flow hash: %v", err)
+	}
 
 	// If main interface is still up flush its routes or they'll conflict with $HostIfName
 	link, err := netlink.LinkByName(params.mainInterface)

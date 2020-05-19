@@ -9,4 +9,4 @@ require (
 	github.com/sirupsen/logrus v1.4.2
 	github.com/vishvananda/netlink v1.0.1-0.20191217171528-ed8931371a80
 )
-replace github.com/calico-vpp/vpplink v0.0.0-20200506131545-27ddd6aec688 => ../vpplink
+replace github.com/calico-vpp/vpplink => ../vpplink

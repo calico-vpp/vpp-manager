@@ -48,6 +48,8 @@ const (
 	VppApiSocket                  = "/var/run/vpp/vpp-api.sock"
 	VppPath                       = "/usr/bin/vpp"
 	IpConfigEnvVar                = "CALICOVPP_IP_CONFIG"
+	RxModeEnvVar                  = "CALICOVPP_RX_MODE"
+	TapRxModeEnvVar               = "CALICOVPP_TAP_RX_MODE"
 	InterfaceEnvVar               = "CALICOVPP_INTERFACE"
 	ConfigTemplateEnvVar          = "CALICOVPP_CONFIG_TEMPLATE"
 	ConfigExecTemplateEnvVar      = "CALICOVPP_CONFIG_EXEC_TEMPLATE"
@@ -91,6 +93,8 @@ type vppManagerParams struct {
 	configExecTemplate      string
 	configTemplate          string
 	nodeName                string
+	rxMode                  types.RxMode
+	tapRxMode               types.RxMode
 	serviceNet              *net.IPNet
 	vppIpConfSource         string
 	vppSideMacAddress       net.HardwareAddr
@@ -99,6 +103,19 @@ type vppManagerParams struct {
 	vppTapIP4               net.IP
 	vppFakeNextHopIP6       net.IP
 	vppTapIP6               net.IP
+}
+
+func getRxMode(envVar string) types.RxMode {
+	switch os.Getenv(envVar) {
+	case "interrupt":
+		return types.Interrupt
+	case "polling":
+		return types.Polling
+	case "adaptive":
+		return types.Adaptative
+	default:
+		return types.DefaultRxMode
+	}
 }
 
 func parseEnvVariables() (err error) {
@@ -140,6 +157,9 @@ func parseEnvVariables() (err error) {
 	if params.vppIpConfSource != "linux" { // TODO add other sources
 		return errors.Errorf("No ip configuration source specified. Specify one of linux, [[calico or dhcp]] through the %s environment variable", IpConfigEnvVar)
 	}
+
+	params.rxMode = getRxMode(RxModeEnvVar)
+	params.tapRxMode = getRxMode(TapRxModeEnvVar)
 
 	params.vppSideMacAddress, err = net.ParseMAC(vppSideMacAddressString)
 	if err != nil {
@@ -647,6 +667,11 @@ func configureVpp() (err error) {
 		return errors.Wrap(err, "error enabling GSO on data interface")
 	}
 
+	err = vpp.SetInterfaceRxMode(DataInterfaceSwIfIndex, types.AllQueues, params.rxMode)
+	if err != nil {
+		log.Errorf("error SetInterfaceRxMode on data interface %v", err)
+	}
+
 	err = vpp.EnableInterfaceIP6(DataInterfaceSwIfIndex)
 	if err != nil {
 		return errors.Wrap(err, "error enabling ip6 on if")
@@ -720,6 +745,11 @@ func configureVpp() (err error) {
 	err = vpp.EnableInterfaceIP6(tapSwIfIndex)
 	if err != nil {
 		return errors.Wrap(err, "error enabling ip6 on vpptap0")
+	}
+
+	err = vpp.SetInterfaceRxMode(tapSwIfIndex, types.AllQueues, params.tapRxMode)
+	if err != nil {
+		log.Errorf("error SetInterfaceRxMode on vpptap0 %v", err)
 	}
 
 	err = configurePunt(tapSwIfIndex)

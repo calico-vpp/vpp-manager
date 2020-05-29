@@ -47,6 +47,7 @@ const (
 	VppManagerTapIdxFile          = "/var/run/vpp/vppmanagertap0"
 	VppApiSocket                  = "/var/run/vpp/vpp-api.sock"
 	VppPath                       = "/usr/bin/vpp"
+	NodeNameEnvVar                = "NODENAME"
 	IpConfigEnvVar                = "CALICOVPP_IP_CONFIG"
 	RxModeEnvVar                  = "CALICOVPP_RX_MODE"
 	TapRxModeEnvVar               = "CALICOVPP_TAP_RX_MODE"
@@ -54,6 +55,7 @@ const (
 	ConfigTemplateEnvVar          = "CALICOVPP_CONFIG_TEMPLATE"
 	ConfigExecTemplateEnvVar      = "CALICOVPP_CONFIG_EXEC_TEMPLATE"
 	VppStartupSleepEnvVar         = "CALICOVPP_VPP_STARTUP_SLEEP"
+	ExtraAddrCountEnvVar          = "CALICOVPP_CONFIGURE_EXTRA_ADDRESSES"
 	ServicePrefixEnvVar           = "SERVICE_PREFIX"
 	HostIfName                    = "vpptap0"
 	HostIfTag                     = "hosttap"
@@ -97,6 +99,7 @@ type vppManagerParams struct {
 	tapRxMode               types.RxMode
 	serviceNet              *net.IPNet
 	vppIpConfSource         string
+	extraAddrCount          int
 	vppSideMacAddress       net.HardwareAddr
 	containerSideMacAddress net.HardwareAddr
 	vppFakeNextHopIP4       net.IP
@@ -142,7 +145,7 @@ func parseEnvVariables() (err error) {
 		return fmt.Errorf("empty VPP configuration template, set a template in the %s environment variable", ConfigTemplateEnvVar)
 	}
 
-	params.nodeName = os.Getenv("NODENAME")
+	params.nodeName = os.Getenv(NodeNameEnvVar)
 	if params.nodeName == "" {
 		return errors.Errorf("No node name specified. Specify the NODENAME environment variable")
 	}
@@ -156,6 +159,16 @@ func parseEnvVariables() (err error) {
 	params.vppIpConfSource = os.Getenv(IpConfigEnvVar)
 	if params.vppIpConfSource != "linux" { // TODO add other sources
 		return errors.Errorf("No ip configuration source specified. Specify one of linux, [[calico or dhcp]] through the %s environment variable", IpConfigEnvVar)
+	}
+
+	params.extraAddrCount = 0
+	if extraAddrConf := os.Getenv(ExtraAddrCountEnvVar); extraAddrConf != "" {
+		extraAddrCount, err := strconv.ParseInt(extraAddrConf, 10, 8)
+		if err != nil {
+			log.Errorf("Couldn't parse %s: %v", ExtraAddrCountEnvVar, err)
+		} else {
+			params.extraAddrCount = int(extraAddrCount)
+		}
 	}
 
 	params.rxMode = getRxMode(RxModeEnvVar)
@@ -612,16 +625,7 @@ func createVppLink() (vpp *vpplink.VppLink, err error) {
 }
 
 func addExtraAddresses(addrList []netlink.Addr) (err error) {
-	extraAddrConf := os.Getenv("CALICOVPP_CONFIGURE_EXTRA_ADDRESSES")
-	if extraAddrConf == "" {
-		log.Infof("Not configuring extra addresses")
-		return nil
-	}
-	extraAddr, err := strconv.ParseInt(extraAddrConf, 10, 8)
-	if extraAddr == 0 {
-		return fmt.Errorf("CALICOVPP_CONFIGURE_EXTRA_ADDRESSES parses to 0: %v", err)
-	}
-	log.Infof("Adding %d extra addresses", extraAddr)
+	log.Infof("Adding %d extra addresses", params.extraAddrCount)
 	v4Count := 0
 	var addr net.IPNet
 	for _, a := range addrList {
@@ -633,7 +637,7 @@ func addExtraAddresses(addrList []netlink.Addr) (err error) {
 	if v4Count != 1 {
 		return fmt.Errorf("%d IPv4 addresses found, not configuring extra addresses (need exactly 1)", v4Count)
 	}
-	for i := int64(1); i <= extraAddr; i++ {
+	for i := 1; i <= params.extraAddrCount; i++ {
 		a := &net.IPNet{
 			IP:   net.IP(append([]byte(nil), addr.IP.To4()...)),
 			Mask: addr.Mask,

@@ -23,7 +23,7 @@ vpp:
 	cd vpp_build;                                          \
 	make install-dep;                                      \
 	git apply ../vpp-build.patch;                          \
-	make build-release;                                    \
+	make rebuild-release;                                  \
 	rm -f ./build-root/*.deb;                              \
 	make pkg-deb;                                          \
 	git apply -R ../vpp-build.patch;                       \

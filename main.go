@@ -591,6 +591,14 @@ func configureVpp() (err error) {
 	if err != nil {
 		return errors.Wrap(err, "error setting data interface up")
 	}
+
+	// Always enable GSO feature on data interface, only a tiny negative effect on perf if GSO is not
+	// enabled on the taps or already done before an encap
+	err = vpp.EnableGSOFeature(DataInterfaceSwIfIndex)
+	if err != nil {
+		return errors.Wrap(err, "error enabling GSO on data interface")
+	}
+
 	err = vpp.EnableInterfaceIP6(DataInterfaceSwIfIndex)
 	if err != nil {
 		return errors.Wrap(err, "error enabling ip6 on if")

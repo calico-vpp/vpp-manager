@@ -30,6 +30,10 @@ github.com/calico-vpp/vpplink v0.0.0-20200428123446-9bf599b35164 h1:Ef25ofThhJw2
 github.com/calico-vpp/vpplink v0.0.0-20200428123446-9bf599b35164/go.mod h1:XTN1gO6hiGU5wsrufaFMODcu4Puaief2iRsj+V/iIYY=
 github.com/calico-vpp/vpplink v0.0.0-20200506131545-27ddd6aec688 h1:qfN7Lv3aX1xBYQM4WDaYmblYS+7xX+JpYD24TXal90k=
 github.com/calico-vpp/vpplink v0.0.0-20200506131545-27ddd6aec688/go.mod h1:XTN1gO6hiGU5wsrufaFMODcu4Puaief2iRsj+V/iIYY=
+github.com/calico-vpp/vpplink v0.0.0-20200602084649-2fa93526b74c h1:m4DBVqWjCb5KOVR0JVr6GMIhhNpRVEYcyZusVcr2+SI=
+github.com/calico-vpp/vpplink v0.0.0-20200602084649-2fa93526b74c/go.mod h1:XTN1gO6hiGU5wsrufaFMODcu4Puaief2iRsj+V/iIYY=
+github.com/calico-vpp/vpplink v0.0.0-20200602104200-eb33b915f772 h1:VkWDriU5kzLFNZdg+M0NV2J3LwIV+Yn4gDU8mAyREhw=
+github.com/calico-vpp/vpplink v0.0.0-20200602104200-eb33b915f772/go.mod h1:XTN1gO6hiGU5wsrufaFMODcu4Puaief2iRsj+V/iIYY=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
 github.com/coreos/bbolt v1.3.3 h1:n6AiVyVRKQFNb6mJlwESEvvLoDyiTzXX7ORAUlkeBdY=
 github.com/coreos/bbolt v1.3.3/go.mod h1:iRUV2dpdMOn7Bo10OQBFzIJO9kkE559Wcmn+qkEiiKk=

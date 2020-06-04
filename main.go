@@ -56,11 +56,13 @@ const (
 	ConfigExecTemplateEnvVar      = "CALICOVPP_CONFIG_EXEC_TEMPLATE"
 	VppStartupSleepEnvVar         = "CALICOVPP_VPP_STARTUP_SLEEP"
 	ExtraAddrCountEnvVar          = "CALICOVPP_CONFIGURE_EXTRA_ADDRESSES"
+	CorePatternEnvVar             = "CALICOVPP_CORE_PATTERN"
 	ServicePrefixEnvVar           = "SERVICE_PREFIX"
 	HostIfName                    = "vpptap0"
 	HostIfTag                     = "hosttap"
 	VppTapIP4PrefixLen            = 30
 	VppTapIP6PrefixLen            = 120
+	VppSigKillTimeout             = 2
 	vppSideMacAddressString       = "02:00:00:00:00:02"
 	containerSideMacAddressString = "02:00:00:00:00:01"
 	vppFakeNextHopIP4String       = "169.254.254.254"
@@ -95,6 +97,7 @@ type vppManagerParams struct {
 	configExecTemplate      string
 	configTemplate          string
 	nodeName                string
+	corePattern             string
 	rxMode                  types.RxMode
 	tapRxMode               types.RxMode
 	serviceNet              *net.IPNet
@@ -161,6 +164,8 @@ func parseEnvVariables() (err error) {
 		return errors.Errorf("No ip configuration source specified. Specify one of linux, [[calico or dhcp]] through the %s environment variable", IpConfigEnvVar)
 	}
 
+	params.corePattern = os.Getenv(CorePatternEnvVar)
+
 	params.extraAddrCount = 0
 	if extraAddrConf := os.Getenv(ExtraAddrCountEnvVar); extraAddrConf != "" {
 		extraAddrCount, err := strconv.ParseInt(extraAddrConf, 10, 8)
@@ -201,26 +206,41 @@ func parseEnvVariables() (err error) {
 	return nil
 }
 
+func timeOutSigKill() {
+	time.Sleep(VppSigKillTimeout * time.Second)
+	log.Infof("SIGKILL vpp with (PID %d)", vppProcess.Pid)
+	vppProcess.Signal(syscall.SIGKILL)
+}
+
+func signalVpp(s os.Signal) {
+	if vppProcess == nil {
+		runningCond.L.Lock()
+		for vppProcess == nil {
+			runningCond.Wait()
+		}
+		runningCond.L.Unlock()
+	}
+	// special case
+	// for SIGTERM, which doesn't kill vpp quick enough
+	if s == syscall.SIGTERM {
+		s = syscall.SIGINT
+	}
+	vppProcess.Signal(s)
+	log.Infof("Signaled vpp (PID %d) %+v", vppProcess.Pid, s)
+	if s == syscall.SIGINT || s == syscall.SIGQUIT || s == syscall.SIGSTOP {
+		go timeOutSigKill()
+	}
+}
+
 func handleSignals() {
 	signals := make(chan os.Signal, 10)
 	signal.Notify(signals)
+	signal.Reset(syscall.SIGCHLD)
+	signal.Reset(syscall.SIGURG)
 	for {
 		s := <-signals
 		log.Infof("Received signal %+v", s)
-		if vppProcess == nil {
-			runningCond.L.Lock()
-			for vppProcess == nil {
-				runningCond.Wait()
-			}
-			runningCond.L.Unlock()
-		}
-		// Forward signals to VPP - special case
-		// for SIGTERM, which doesn't kill vpp quick enough
-		if s == syscall.SIGTERM {
-			s = syscall.SIGINT
-		}
-		vppProcess.Signal(s)
-		log.Infof("Signaled vpp with %+v", s)
+		signalVpp(s)
 	}
 }
 
@@ -853,15 +873,15 @@ func runVpp() (int, error) {
 	err = configureVpp()
 	if err != nil {
 		// Send a SIGINT to VPP to stop it
-		log.Errorf("Error configuring VPP: %v", err)
-		vppProcess.Signal(syscall.SIGINT)
+		log.Errorf("Error configuring VPP (SIGINT %d): %v", vppProcess.Pid, err)
+		signalVpp(syscall.SIGINT)
 	}
 
 	// Update the Calico node with the IP address actually configured on VPP
 	err = updateCalicoNode()
 	if err != nil {
-		log.Errorf("Error updating Calico node: %v", err)
-		vppProcess.Signal(syscall.SIGINT)
+		log.Errorf("Error updating Calico node (SIGINT %d): %v", vppProcess.Pid, err)
+		signalVpp(syscall.SIGINT)
 	}
 
 	go syncPools()
@@ -905,6 +925,17 @@ func clearVppManagerFiles() error {
 	return writeFile("-1", VppManagerTapIdxFile)
 }
 
+func setCorePattern() {
+	if params.corePattern == "" {
+		return
+	}
+	log.Infof("Setting corePattern to : %s", params.corePattern)
+	err := writeFile(params.corePattern, "/proc/sys/kernel/core_pattern")
+	if err != nil {
+		log.Errorf("Error writing corePattern: %+v", err)
+	}
+}
+
 func main() {
 	err := clearVppManagerFiles()
 	if err != nil {
@@ -916,6 +947,7 @@ func main() {
 		log.Errorf("Error parsing env varibales: %+v", err)
 		return
 	}
+	setCorePattern()
 
 	err = configureContainer()
 	if err != nil {

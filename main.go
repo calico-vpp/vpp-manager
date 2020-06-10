@@ -46,6 +46,7 @@ const (
 	VppManagerStatusFile          = "/var/run/vpp/vppmanagerstatus"
 	VppManagerTapIdxFile          = "/var/run/vpp/vppmanagertap0"
 	VppApiSocket                  = "/var/run/vpp/vpp-api.sock"
+	CalicoVppPidFile              = "/var/run/vpp/calico_vpp.pid"
 	VppPath                       = "/usr/bin/vpp"
 	NodeNameEnvVar                = "NODENAME"
 	IpConfigEnvVar                = "CALICOVPP_IP_CONFIG"
@@ -72,11 +73,15 @@ const (
 )
 
 var (
-	vppProcess    *os.Process
 	runningCond   *sync.Cond
 	initialConfig interfaceConfig
 	params        vppManagerParams
 	vpp           *vpplink.VppLink
+	vppCmd        *exec.Cmd
+	vppProcess    *os.Process
+	vppDeadChan   chan bool
+	vppAlive      bool
+	signals       chan os.Signal
 )
 
 type interfaceConfig struct {
@@ -208,39 +213,56 @@ func parseEnvVariables() (err error) {
 
 func timeOutSigKill() {
 	time.Sleep(VppSigKillTimeout * time.Second)
-	log.Infof("SIGKILL vpp with (PID %d)", vppProcess.Pid)
-	vppProcess.Signal(syscall.SIGKILL)
+	log.Infof("Timeout : SIGKILL vpp")
+	signals <- syscall.SIGKILL
 }
 
-func signalVpp(s os.Signal) {
-	if vppProcess == nil {
-		runningCond.L.Lock()
-		for vppProcess == nil {
-			runningCond.Wait()
-		}
-		runningCond.L.Unlock()
-	}
-	// special case
-	// for SIGTERM, which doesn't kill vpp quick enough
-	if s == syscall.SIGTERM {
-		s = syscall.SIGINT
-	}
-	vppProcess.Signal(s)
-	log.Infof("Signaled vpp (PID %d) %+v", vppProcess.Pid, s)
-	if s == syscall.SIGINT || s == syscall.SIGQUIT || s == syscall.SIGSTOP {
-		go timeOutSigKill()
-	}
+func terminateVpp(format string, args ...interface{}) {
+	log.Errorf(format, args...)
+	log.Infof("Terminating Vpp (SIGINT)")
+	signals <- syscall.SIGINT
 }
 
 func handleSignals() {
-	signals := make(chan os.Signal, 10)
+	signals = make(chan os.Signal, 10)
 	signal.Notify(signals)
-	signal.Reset(syscall.SIGCHLD)
 	signal.Reset(syscall.SIGURG)
 	for {
 		s := <-signals
+		if vppProcess == nil && s == syscall.SIGCHLD {
+			/* Don't handle sigchld before vpp starts
+			   There might still be a race condition if
+			   vpp sefaults right on startup */
+			continue
+		} else if vppProcess == nil {
+			runningCond.L.Lock()
+			for vppProcess == nil {
+				runningCond.Wait()
+			}
+			runningCond.L.Unlock()
+		}
 		log.Infof("Received signal %+v", s)
-		signalVpp(s)
+		if s == syscall.SIGCHLD {
+			processState, err := vppCmd.Process.Wait()
+			vppDeadChan <- true
+			if err != nil {
+				log.Errorf("processWait errored with %v", err)
+			} else {
+				log.Infof("processWait returned %v", processState)
+			}
+		} else {
+			/* special case
+			   for SIGTERM, which doesn't kill vpp quick enough */
+			if s == syscall.SIGTERM {
+				s = syscall.SIGINT
+			}
+			vppProcess.Signal(s)
+			log.Infof("Signaled vpp (PID %d) %+v", vppProcess.Pid, s)
+			if s == syscall.SIGINT || s == syscall.SIGQUIT || s == syscall.SIGSTOP {
+				go timeOutSigKill()
+			}
+		}
+		log.Infof("Done with signal %+v", s)
 	}
 }
 
@@ -348,21 +370,6 @@ func writeFile(state string, path string) error {
 	return nil
 }
 
-// Set interface down if it is up, bind it to a VPP-friendly driver
-func prepareInterface() error {
-	if initialConfig.isUp {
-		link, err := netlink.LinkByName(params.mainInterface)
-		if err != nil {
-			return errors.Wrapf(err, "error finding link %s", params.mainInterface)
-		}
-		err = netlink.LinkSetDown(link)
-		if err != nil {
-			return errors.Wrapf(err, "error setting link %s down", params.mainInterface)
-		}
-	}
-	return nil
-}
-
 func restoreLinuxConfig() (err error) {
 	// No need to delete the tap we created with VPP since it should disappear with all its configuration
 	// when VPP dies
@@ -437,7 +444,7 @@ func generateVppConfigExecFile() error {
 	// Trivial rendering for the moment...
 	template := strings.ReplaceAll(params.configExecTemplate, "__VPP_DATAPLANE_IF__", params.mainInterface)
 	err := errors.Wrapf(
-		ioutil.WriteFile(VppConfigExecFile, []byte(template), 0744),
+		ioutil.WriteFile(VppConfigExecFile, []byte(template+"\n"), 0744),
 		"error writing VPP Exec configuration to %s",
 		VppConfigFile,
 	)
@@ -457,7 +464,7 @@ func generateVppConfigFile() error {
 	// Trivial rendering for the moment...
 	template := strings.ReplaceAll(params.configTemplate, "__PCI_DEVICE_ID__", initialConfig.pciId)
 	return errors.Wrapf(
-		ioutil.WriteFile(VppConfigFile, []byte(template), 0644),
+		ioutil.WriteFile(VppConfigFile, []byte(template+"\n"), 0644),
 		"error writing VPP configuration to %s",
 		VppConfigFile,
 	)
@@ -845,22 +852,46 @@ func updateCalicoNode() (err error) {
 	return errors.Wrapf(err, "error updating node %s", params.nodeName)
 }
 
-// Returns VPP exit code
-func runVpp() (int, error) {
-	err := prepareInterface()
-	// From this point it is very important that every exit path calls restoreLinuxConfig after vpp exits
+func pingCalicoVpp() error {
+	dat, err := ioutil.ReadFile(CalicoVppPidFile)
 	if err != nil {
-		restoreLinuxConfig()
-		return 0, errors.Wrap(err, "Error preparing interface for VPP")
+		return errors.Wrapf(err, "Error reading %s", CalicoVppPidFile)
 	}
+	pid, err := strconv.ParseInt(strings.TrimSpace(string(dat[:])), 10, 64)
+	if err != nil {
+		return errors.Wrapf(err, "Error parsing %s", dat)
+	}
+	err = syscall.Kill(int(pid), syscall.SIGUSR1)
+	if err != nil {
+		return errors.Wrapf(err, "Error kill -SIGUSR1 %d", int(pid))
+	}
+	log.Infof("Did kill -SIGUSR1 %d", int(pid))
+	return nil
+}
 
-	vppCmd := exec.Command(VppPath, "-c", VppConfigFile)
+// Returns VPP exit code
+func runVpp() (err error) {
+	if initialConfig.isUp {
+		// Set interface down if it is up, bind it to a VPP-friendly driver
+		link, err := netlink.LinkByName(params.mainInterface)
+		if err != nil {
+			return errors.Wrapf(err, "error finding link %s", params.mainInterface)
+		}
+		err = netlink.LinkSetDown(link)
+		if err != nil {
+			// In case it still succeeded
+			netlink.LinkSetUp(link)
+			return errors.Wrapf(err, "error setting link %s down", params.mainInterface)
+		}
+	}
+	// From this point it is very important that every exit path calls restoreLinuxConfig after vpp exits
+	vppCmd = exec.Command(VppPath, "-c", VppConfigFile)
 	vppCmd.Stdout = os.Stdout
 	vppCmd.Stderr = os.Stderr
 	err = vppCmd.Start()
 	if err != nil {
 		restoreLinuxConfig()
-		return 0, errors.Wrap(err, "error starting vpp process")
+		return errors.Wrap(err, "error starting vpp process")
 	}
 	vppProcess = vppCmd.Process
 	log.Infof("VPP started. PID: %d", vppProcess.Pid)
@@ -872,22 +903,19 @@ func runVpp() (int, error) {
 	// Configure VPP
 	err = configureVpp()
 	if err != nil {
-		// Send a SIGINT to VPP to stop it
-		log.Errorf("Error configuring VPP (SIGINT %d): %v", vppProcess.Pid, err)
-		signalVpp(syscall.SIGINT)
+		terminateVpp("Error configuring VPP (SIGINT %d): %v", vppProcess.Pid, err)
 	}
 
 	// Update the Calico node with the IP address actually configured on VPP
 	err = updateCalicoNode()
 	if err != nil {
-		log.Errorf("Error updating Calico node (SIGINT %d): %v", vppProcess.Pid, err)
-		signalVpp(syscall.SIGINT)
+		terminateVpp("Error updating Calico node (SIGINT %d): %v", vppProcess.Pid, err)
 	}
 
 	go syncPools()
 
 	writeFile("1", VppManagerStatusFile)
-	vppErr := vppCmd.Wait()
+	<-vppDeadChan
 	log.Infof("VPP Exited: status %v", err)
 	err = clearVppManagerFiles()
 	if err != nil {
@@ -897,15 +925,11 @@ func runVpp() (int, error) {
 	if err != nil {
 		log.Errorf("Error restoring linux config: %v", err)
 	}
-	switch e := vppErr.(type) {
-	case *exec.ExitError:
-		return e.ExitCode(), nil
-	case nil: // k8 cni removal
-		return 0, nil
-	default:
-		log.Errorf("Error handling vpp process: %v", vppErr)
-		return 0, nil
+	err = pingCalicoVpp()
+	if err != nil {
+		log.Errorf("Error pinging calico-vpp: %v", err)
 	}
+	return nil
 }
 
 func configureContainer() error {
@@ -937,6 +961,9 @@ func setCorePattern() {
 }
 
 func main() {
+	vppDeadChan = make(chan bool, 1)
+	vppAlive = false
+
 	err := clearVppManagerFiles()
 	if err != nil {
 		log.Errorf("Error clearing config files: %+v", err)
@@ -975,9 +1002,9 @@ func main() {
 		log.Errorf("Error generating VPP config: %s", err)
 		return
 	}
-	exitCode, err := runVpp()
+	err = runVpp()
 	if err != nil {
 		log.Errorf("Error running VPP: %v", err)
 	}
-	os.Exit(exitCode)
+	return
 }

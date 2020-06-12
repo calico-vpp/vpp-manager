@@ -68,8 +68,8 @@ const (
 	containerSideMacAddressString = "02:00:00:00:00:01"
 	vppFakeNextHopIP4String       = "169.254.254.254"
 	vppTapIP4String               = "169.254.254.253"
-	vppFakeNextHopIP6String       = "fe80:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
-	vppTapIP6String               = "fe80:ffff:ffff:ffff:ffff:ffff:ffff:fffe"
+	vppFakeNextHopIP6String       = "fc00:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+	vppTapIP6String               = "fc00:ffff:ffff:ffff:ffff:ffff:ffff:fffe"
 )
 
 var (

@@ -978,13 +978,13 @@ func main() {
 
 	/* Run this first in case this is a script
 	 * that's responsible for creating a VF */
-	err = generateVppConfigExecFile()
+	err := generateVppConfigExecFile()
 	if err != nil {
 		log.Errorf("Error generating VPP config Exec: %s", err)
 		return
 	}
 
-	err := clearVppManagerFiles()
+	err = clearVppManagerFiles()
 	if err != nil {
 		log.Errorf("Error clearing config files: %+v", err)
 		return

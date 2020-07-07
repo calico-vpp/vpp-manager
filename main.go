@@ -463,6 +463,7 @@ func generateVppConfigExecFile() error {
 func generateVppConfigFile() error {
 	// Trivial rendering for the moment...
 	template := strings.ReplaceAll(params.configTemplate, "__PCI_DEVICE_ID__", initialConfig.pciId)
+	template = strings.ReplaceAll(template, "__VPP_DATAPLANE_IF__", params.mainInterface)
 	return errors.Wrapf(
 		ioutil.WriteFile(VppConfigFile, []byte(template+"\n"), 0644),
 		"error writing VPP configuration to %s",
@@ -678,19 +679,8 @@ func addExtraAddresses(addrList []netlink.Addr) (err error) {
 	return nil
 }
 
-func configureVpp() (err error) {
-	vpp, err = createVppLink()
-	if err != nil {
-		return fmt.Errorf("cannot connect to VPP after 10 tries")
-	}
+func configureVpp(vpp *vpplink.VppLink) (err error) {
 	defer vpp.Close()
-
-	// Data interface configuration
-	err = vpp.Retry(2*time.Second, 10, vpp.InterfaceAdminUp, DataInterfaceSwIfIndex)
-	if err != nil {
-		return errors.Wrap(err, "error setting data interface up")
-	}
-
 	// Always enable GSO feature on data interface, only a tiny negative effect on perf if GSO is not
 	// enabled on the taps or already done before an encap
 	err = vpp.EnableGSOFeature(DataInterfaceSwIfIndex)
@@ -845,10 +835,10 @@ func updateCalicoNode() (err error) {
 		log.Infof("Setting BGP V6 conf %s", params.nodeIP6)
 		node.Spec.BGP.IPv6Address = params.nodeIP6
 	}
-	log.Infof("updating node with: %+v", node)
+	log.Debugf("updating node with: %+v", node)
 	updated, err := client.Nodes().Update(context.Background(), node, calicoopts.SetOptions{})
 	// TODO handle update error / retry if object changed in the meantime
-	log.Infof("updated node: %+v", updated)
+	log.Debugf("updated node: %+v", updated)
 	return errors.Wrapf(err, "error updating node %s", params.nodeName)
 }
 
@@ -890,7 +880,7 @@ func runVpp() (err error) {
 	vppCmd.Stderr = os.Stderr
 	err = vppCmd.Start()
 	if err != nil {
-		restoreLinuxConfig()
+		restoreConfiguration()
 		return errors.Wrap(err, "error starting vpp process")
 	}
 	vppProcess = vppCmd.Process
@@ -900,8 +890,25 @@ func runVpp() (err error) {
 	// If needed, wait some time that vpp boots up
 	time.Sleep(time.Duration(params.vppStartupSleepSeconds) * time.Second)
 
+	vpp, err = createVppLink()
+	if err != nil {
+		terminateVpp("Error connecting to VPP (SIGINT %d): %v", vppProcess.Pid, err)
+		restoreConfiguration()
+		vpp.Close()
+		return fmt.Errorf("cannot connect to VPP after 10 tries")
+	}
+
+	// Data interface configuration
+	err = vpp.Retry(2*time.Second, 10, vpp.InterfaceAdminUp, DataInterfaceSwIfIndex)
+	if err != nil {
+		terminateVpp("Error setting main interface up (SIGINT %d): %v", vppProcess.Pid, err)
+		restoreConfiguration()
+		vpp.Close()
+		return errors.Wrap(err, "error setting data interface up")
+	}
+
 	// Configure VPP
-	err = configureVpp()
+	err = configureVpp(vpp)
 	if err != nil {
 		terminateVpp("Error configuring VPP (SIGINT %d): %v", vppProcess.Pid, err)
 	}
@@ -917,7 +924,13 @@ func runVpp() (err error) {
 	writeFile("1", VppManagerStatusFile)
 	<-vppDeadChan
 	log.Infof("VPP Exited: status %v", err)
-	err = clearVppManagerFiles()
+	restoreConfiguration()
+	return nil
+}
+
+func restoreConfiguration() {
+	log.Infof("Restoring configuration")
+	err := clearVppManagerFiles()
 	if err != nil {
 		log.Errorf("Error clearing vpp manager files: %v", err)
 	}
@@ -929,7 +942,6 @@ func runVpp() (err error) {
 	if err != nil {
 		log.Errorf("Error pinging calico-vpp: %v", err)
 	}
-	return nil
 }
 
 func configureContainer() error {
@@ -964,6 +976,14 @@ func main() {
 	vppDeadChan = make(chan bool, 1)
 	vppAlive = false
 
+	/* Run this first in case this is a script
+	 * that's responsible for creating a VF */
+	err = generateVppConfigExecFile()
+	if err != nil {
+		log.Errorf("Error generating VPP config Exec: %s", err)
+		return
+	}
+
 	err := clearVppManagerFiles()
 	if err != nil {
 		log.Errorf("Error clearing config files: %+v", err)
@@ -992,11 +1012,6 @@ func main() {
 		return
 	}
 
-	err = generateVppConfigExecFile()
-	if err != nil {
-		log.Errorf("Error generating VPP config Exec: %s", err)
-		return
-	}
 	err = generateVppConfigFile()
 	if err != nil {
 		log.Errorf("Error generating VPP config: %s", err)

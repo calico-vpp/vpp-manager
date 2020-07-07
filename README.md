@@ -1,5 +1,10 @@
 # VPP Manager
 
+This project is now part of projectcalico 
+code & issues moved to https://github.com/projectcalico/vpp-dataplane
+
+--------------
+
 This simple program manages VPP in the context of the Calico-VPP intgration.
 It is responsible for:
 - VPP IP configuration. It supports statically replicating the linux configuration, getting the configuration from the Calico node object, and using DHCP. It creates a tap interface in Linux that gives the host access to the container network. If this configuration fails, this program cleanly aborts.
